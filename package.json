@@ -1,0 +1,29 @@
+{
+  "name": "sign-estimation-app",
+  "version": "1.0.0",
+  "description": "Sign estimation and project management application for manufacturing companies",
+  "main": "server/server.js",
+  "type": "module",
+  "scripts": {
+    "dev": "node server/server.js",
+    "build": "node scripts/build.js",
+    "deploy": "node scripts/deploy-to-onedrive.js",
+    "start": "node server/server.js"
+  },
+  "dependencies": {
+    "express": "^4.18.2",
+    "sqlite3": "^5.1.6",
+    "multer": "^1.4.5-lts.1"
+  },
+  "devDependencies": {
+    "nodemon": "^3.0.1"
+  },
+  "keywords": [
+    "sign-estimation",
+    "manufacturing",
+    "project-management",
+    "cost-calculation"
+  ],
+  "author": "Your Company",
+  "license": "MIT"
+}

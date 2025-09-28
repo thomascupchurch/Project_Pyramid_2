@@ -1,0 +1,91 @@
+# --- Python cache / build artifacts ---
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg-info/
+.eggs/
+.build/
+build/
+dist/
+
+# Byte-compiled / optimized / DLL files
+*$py.class
+
+# Virtual environments
+.venv/
+venv/
+.env
+.env.*
+
+# Jupyter / IPython
+.ipynb_checkpoints/
+
+# Test / coverage
+.coverage
+.coverage.*
+htmlcov/
+.pytest_cache/
+.mypy_cache/
+.cache/
+pytestdebug.log
+
+# Logs & temp
+*.log
+logs/
+*.tmp
+*.swp
+*.bak
+
+# SQLite / DB transient files
+*.db-journal
+*.db-wal
+*.db-shm
+# Keep the main database but ignore backups
+sign_estimation.backup*.db
+
+# OS / Editor cruft
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/*
+!.vscode/extensions.json
+!.vscode/settings.json
+
+# Node (legacy / just in case)
+node_modules/
+package-lock.json
+
+# OneDrive local sync artifacts
+~$*
+*.lnk
+
+# Exported reports
+exports/
+*.xlsx
+*.xlsm
+*.csv~
+
+# Deployment / temp folders
+.tmp/
+.temporary/
+
+test_onedrive/
+
+# Security / credentials (add real names if created later)
+secrets.json
+credentials.json
+
+# Wheel / packaging
+*.whl
+pip-wheel-metadata/
+
+# PEP 582
+__pypackages__/
+
+# Cache from tools
+.pyre/
+.pytype/
+
+# End of file
