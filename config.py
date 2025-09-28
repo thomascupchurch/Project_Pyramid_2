@@ -25,6 +25,10 @@ DASH_DEBUG = os.getenv("SIGN_APP_DEBUG", "0").lower() in {"1","true","yes"}
 AUTO_BACKUP_INTERVAL_SEC = int(os.getenv("SIGN_APP_AUTO_BACKUP_SEC", "0"))
 BACKUP_DIR = Path(os.getenv("SIGN_APP_BACKUP_DIR", str(BASE_DIR / "backups")))
 
+# Optional OneDrive external sync directory (outside project root)
+ONEDRIVE_SYNC_DIR = os.getenv("SIGN_APP_ONEDRIVE_SYNC_DIR")  # e.g. C:\\Users\\You\\OneDrive - Company\\SharedSignApp
+ONEDRIVE_AUTOSYNC_SEC = int(os.getenv("SIGN_APP_ONEDRIVE_AUTOSYNC_SEC", "0"))  # 0 disables periodic sync
+
 def ensure_backup_dir():
     if AUTO_BACKUP_INTERVAL_SEC > 0:
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)

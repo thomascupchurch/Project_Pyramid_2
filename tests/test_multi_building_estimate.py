@@ -2,9 +2,11 @@ import sqlite3
 from pathlib import Path
 import sys
 
-sys.path.append(str(Path(__file__).parent.parent / 'utils'))
-from database import DatabaseManager
-from estimate_core import compute_custom_estimate
+root_dir = Path(__file__).parent.parent
+if str(root_dir) not in sys.path:
+    sys.path.insert(0, str(root_dir))
+from utils.database import DatabaseManager
+from utils.estimate_core import compute_custom_estimate
 
 TEST_DB = 'test_multi_building.db'
 

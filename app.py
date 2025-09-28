@@ -59,7 +59,7 @@ app = dash.Dash(
 )
 app.title = "Sign Estimation Tool"
 
-from config import DATABASE_PATH, APP_HOST, APP_PORT, DASH_DEBUG, ensure_backup_dir, AUTO_BACKUP_INTERVAL_SEC, BACKUP_DIR
+from config import DATABASE_PATH, APP_HOST, APP_PORT, DASH_DEBUG, ensure_backup_dir, AUTO_BACKUP_INTERVAL_SEC, BACKUP_DIR, ONEDRIVE_SYNC_DIR, ONEDRIVE_AUTOSYNC_SEC
 DATABASE_PATH = os.getenv("SIGN_APP_DB", DATABASE_PATH)
 print(f"[startup] Database path resolved to: {DATABASE_PATH}", flush=True)
 db_manager = None
@@ -77,6 +77,14 @@ print("[startup] CostCalculator ready.", flush=True)
 print("[startup] Creating OneDriveManager...", flush=True)
 onedrive_manager = OneDriveManager(Path.cwd())
 print("[startup] OneDriveManager ready.", flush=True)
+
+# Optional: configure OneDrive target path if env var provided
+if ONEDRIVE_SYNC_DIR:
+    try:
+        onedrive_manager.setup_onedrive_path(ONEDRIVE_SYNC_DIR)
+        print(f"[startup] OneDrive sync dir set to {ONEDRIVE_SYNC_DIR}")
+    except Exception as e:
+        print(f"[startup][warn] Failed to set OneDrive path: {e}")
 
 print("[startup] Ensuring database schema...", flush=True)
 try:
@@ -126,6 +134,20 @@ def ensure_extended_schema():
         print(f"[migrate][error] {e}")
 
 ensure_extended_schema()
+
+# Background autosync (database only) if enabled
+if ONEDRIVE_SYNC_DIR and ONEDRIVE_AUTOSYNC_SEC > 0:
+    import threading, time
+    def _autosync_loop():
+        while True:
+            try:
+                ok, msg = onedrive_manager.sync_database()
+                if ok:
+                    print(f"[autosync] {msg}")
+            except Exception as e:
+                print(f"[autosync][error] {e}")
+            time.sleep(ONEDRIVE_AUTOSYNC_SEC)
+    threading.Thread(target=_autosync_loop, daemon=True).start()
 
 # ------------------ Initial Sign Types Auto-Load ------------------ #
 def _sign_types_count():
@@ -494,7 +516,7 @@ app.layout = dbc.Container([
     dbc.Row([
         dbc.Col([
             html.Div([
-                html.Img(src="/assets/LSI_Logo.svg", height="60px", className="me-3"),
+                html.Img(src="/assets/LSI_Logo.svg", className="app-logo me-3"),
                 html.H1("Sign Estimation Tool", className="d-inline-block align-middle mb-0")
             ], className="d-flex align-items-center py-3")
         ])
@@ -521,9 +543,15 @@ app.layout = dbc.Container([
     html.Div([
         dbc.Toast(id='app-error-toast', header='Notice', is_open=False, dismissable=True, duration=4000, icon='danger', style={'position':'fixed','top':10,'right':10,'zIndex':1080})
     ]),
-    html.Div(id="tab-content")
+    html.Div(id="tab-content", className='flex-grow-1'),
+    html.Footer(
+        className='app-footer text-center text-muted py-3 small mt-auto',
+        children=[
+            html.Span("© 2025 LSI Graphics, LLC")
+        ]
+    )
     
-], fluid=True)
+], fluid=True, className='d-flex flex-column min-vh-100')
 
 @app.callback(
     Output("tab-content", "children"),
@@ -924,6 +952,19 @@ def render_building_tab():
                         ], md=8),
                         dbc.Col([
                             dbc.Button('Delete', id='bv-delete-sign-btn', color='danger', className='mt-4 w-100')
+                        ], md=4)
+                    ], className='g-3 mb-2'),
+                    html.Hr(),
+                    dbc.Row([
+                        dbc.Col(html.H6('Groups', className='mt-2'), width=12)
+                    ], className='mb-1'),
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label('Remove Group'),
+                            dcc.Dropdown(id='bv-delete-group-dropdown', placeholder='Assigned group')
+                        ], md=8),
+                        dbc.Col([
+                            dbc.Button('Remove Group', id='bv-delete-group-btn', color='danger', className='mt-4 w-100')
                         ], md=4)
                     ], className='g-3 mb-2'),
                     dash_table.DataTable(
@@ -1674,40 +1715,61 @@ def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mod
 
     use_default = (price_mode == 'per_sign' and install_mode == 'percent')
     auto_enabled = bool(auto_install_toggle and 1 in auto_install_toggle)
+    meta = {}
     if use_default:
         estimate_data = db_manager.get_project_estimate(project_id) or []
     else:
         from utils.estimate_core import compute_custom_estimate
-        estimate_data = compute_custom_estimate(
-            DATABASE_PATH, project_id, None if building_id else None,  # project-wide; filter later
+        # Provide building filter directly if user selected building_ids; else None for all
+        estimate_result = compute_custom_estimate(
+            DATABASE_PATH, project_id, building_ids if building_ids else None,
             price_mode, install_mode,
             inst_percent, inst_per_sign, inst_per_area, inst_hours, inst_hourly,
-            auto_enabled
+            auto_enabled, return_meta=True
         )
+        if isinstance(estimate_result, tuple):
+            estimate_data, meta = estimate_result
+        else:
+            estimate_data = estimate_result
     if not estimate_data:
         return [], dbc.Alert("No data", color='warning'), True
-    if building_ids:
-        # Keep only selected buildings + ALL rows
-        selected_names = set()
-        if building_ids:
-            conn = sqlite3.connect(DATABASE_PATH)
-            placeholders = ','.join(['?']*len(building_ids))
-            ndf = pd.read_sql_query(f'SELECT id, name FROM buildings WHERE id IN ({placeholders})', conn, params=tuple(building_ids))
-            conn.close()
-            selected_names = set(ndf['name'].tolist())
+    # If we used default path and building_ids provided, filter manually
+    if use_default and building_ids:
+        conn = sqlite3.connect(DATABASE_PATH)
+        placeholders = ','.join(['?']*len(building_ids))
+        ndf = pd.read_sql_query(f'SELECT id, name FROM buildings WHERE id IN ({placeholders})', conn, params=tuple(building_ids))
+        conn.close()
+        selected_names = set(ndf['name'].tolist())
         estimate_data = [r for r in estimate_data if r['Building'] in selected_names or r['Building']=='ALL']
     if not estimate_data:
         return [], dbc.Alert("No data for selection", color='warning'), True
     df = pd.DataFrame(estimate_data)
     total = df['Total'].sum() if 'Total' in df else 0
-    summary_lines = [f"Total Estimate: ${total:,.2f}"]
+    # Build chips & meta display
+    chips = []
+    chips.append(dbc.Badge(f"Total: ${total:,.2f}", color='primary', className='me-1'))
+    if building_ids:
+        chips.append(dbc.Badge(f"Buildings: {len(building_ids)}", color='secondary', className='me-1'))
+    if not use_default and meta:
+        chips.append(dbc.Badge(f"Signs: {int(meta.get('total_sign_count',0))}", color='info', className='me-1'))
+        if meta.get('total_area'):
+            chips.append(dbc.Badge(f"Area: {meta['total_area']:.1f} sq ft", color='light', text_color='dark', className='me-1'))
+        if meta.get('auto_install_amount_per_sign'):
+            chips.append(dbc.Badge(f"Auto Inst $/sign sum: ${meta['auto_install_amount_per_sign']:.2f}", color='warning', className='me-1'))
+        if meta.get('auto_install_hours'):
+            chips.append(dbc.Badge(f"Auto Inst Hours: {meta['auto_install_hours']:.1f}", color='warning', className='me-1'))
+        if meta.get('install_cost'):
+            chips.append(dbc.Badge(f"Install: ${meta['install_cost']:.2f}", color='danger', className='me-1'))
+    # Pricing mode note
+    note_lines = []
     if price_mode == 'per_area':
-        summary_lines.append("Pricing basis: Area * Material Rate")
+        note_lines.append("Pricing basis: Area * Material Rate")
     if not use_default:
-        detail_bits = [f"Install mode: {install_mode}"]
-    # In refactored path auto-derived details handled inside compute_custom_estimate (future enhancement: expose meta)
-        summary_lines.append("; ".join(detail_bits))
-    summary = dbc.Alert(" | ".join(summary_lines), color='info')
+        note_lines.append(f"Install mode: {install_mode}")
+    summary = html.Div([
+        html.Div(chips, className='mb-1'),
+        html.Small(" | ".join(note_lines)) if note_lines else None
+    ])
     return df.to_dict('records'), summary, False
 
 @app.callback(
@@ -2381,6 +2443,7 @@ def bv_load_buildings(project_id):
     Output('bv-sign-type-dropdown','options'),
     Output('bv-signs-table','data'),
     Output('bv-delete-sign-dropdown','options'),
+    Output('bv-delete-group-dropdown','options'),
     Output('bv-building-meta','children'),
     Output('bv-summary','children'),
     Input('bv-building-dropdown','value'),
@@ -2395,31 +2458,37 @@ def bv_load_building(building_id):
     rows_df = pd.read_sql_query('''SELECT st.name as sign_name, bs.quantity, st.unit_price, (bs.quantity*st.unit_price) as total
                                    FROM building_signs bs JOIN sign_types st ON bs.sign_type_id=st.id
                                    WHERE bs.building_id=? ORDER BY st.name''', conn, params=(building_id,))
+    grp_df = pd.read_sql_query('''SELECT sg.name, bsg.quantity FROM building_sign_groups bsg JOIN sign_groups sg ON bsg.group_id=sg.id WHERE bsg.building_id=? ORDER BY sg.name''', conn, params=(building_id,))
     conn.close()
     st_opts = [{'label': f"{r.name} (${r.unit_price})", 'value': r.id} for r in st_df.itertuples()]
     table_rows = rows_df.to_dict('records')
     del_opts = [{'label': r['sign_name'], 'value': r['sign_name']} for r in table_rows]
+    group_del_opts = [{'label': r.name, 'value': r.name} for r in grp_df.itertuples()] if not grp_df.empty else []
     meta = '' if b_df.empty else f"{b_df.iloc[0]['name']} - {b_df.iloc[0].get('description','')}"
     subtotal = sum(r['total'] for r in table_rows) if table_rows else 0
-    summary = f"Subtotal: ${subtotal:,.2f} | Signs: {len(table_rows)}"
-    return st_opts, table_rows, del_opts, meta, summary
+    group_count = 0 if grp_df.empty else grp_df.shape[0]
+    summary = f"Subtotal: ${subtotal:,.2f} | Signs: {len(table_rows)} | Groups: {group_count}"
+    return st_opts, table_rows, del_opts, group_del_opts, meta, summary
 
 @app.callback(
     Output('bv-signs-table','data', allow_duplicate=True),
     Output('bv-delete-sign-dropdown','options', allow_duplicate=True),
+    Output('bv-delete-group-dropdown','options', allow_duplicate=True),
     Output('bv-summary','children', allow_duplicate=True),
     Output('bv-feedback','children', allow_duplicate=True),
     Input('bv-add-sign-btn','n_clicks'),
     Input('bv-save-signs-btn','n_clicks'),
     Input('bv-delete-sign-btn','n_clicks'),
+    Input('bv-delete-group-btn','n_clicks'),
     State('bv-building-dropdown','value'),
     State('bv-sign-type-dropdown','value'),
     State('bv-sign-qty-input','value'),
     State('bv-delete-sign-dropdown','value'),
+    State('bv-delete-group-dropdown','value'),
     State('bv-signs-table','data'),
     prevent_initial_call=True
 )
-def bv_manage_signs(add_clicks, save_clicks, delete_clicks, building_id, sign_type_id, qty, delete_name, current_rows):
+def bv_manage_signs(add_clicks, save_clicks, delete_clicks, delete_group_clicks, building_id, sign_type_id, qty, delete_name, delete_group_name, current_rows):
     triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
     if not building_id:
         raise PreventUpdate
@@ -2453,18 +2522,27 @@ def bv_manage_signs(add_clicks, save_clicks, delete_clicks, building_id, sign_ty
         if st:
             cur.execute('DELETE FROM building_signs WHERE building_id=? AND sign_type_id=?', (building_id, st[0]))
             msg = 'Sign removed'
+    elif 'bv-delete-group-btn' in triggered and delete_group_name:
+        # Remove group assignment
+        cur.execute('SELECT id FROM sign_groups WHERE name=?', (delete_group_name,))
+        g = cur.fetchone()
+        if g:
+            cur.execute('DELETE FROM building_sign_groups WHERE building_id=? AND group_id=?', (building_id, g[0]))
+            msg = 'Group removed'
     if msg is not dash.no_update:
         conn.commit()
     # Reload
     rows_df = pd.read_sql_query('''SELECT st.name as sign_name, bs.quantity, st.unit_price, (bs.quantity*st.unit_price) as total
                                    FROM building_signs bs JOIN sign_types st ON bs.sign_type_id=st.id
                                    WHERE bs.building_id=? ORDER BY st.name''', conn, params=(building_id,))
+    grp_df = pd.read_sql_query('''SELECT sg.name, bsg.quantity FROM building_sign_groups bsg JOIN sign_groups sg ON bsg.group_id=sg.id WHERE bsg.building_id=? ORDER BY sg.name''', conn, params=(building_id,))
     conn.close()
     table_rows = rows_df.to_dict('records')
     del_opts = [{'label': r['sign_name'], 'value': r['sign_name']} for r in table_rows]
+    group_del_opts = [{'label': r.name, 'value': r.name} for r in grp_df.itertuples()] if not grp_df.empty else []
     subtotal = sum(r['total'] for r in table_rows) if table_rows else 0
-    summary = f"Subtotal: ${subtotal:,.2f} | Signs: {len(table_rows)}"
-    return table_rows, del_opts, summary, msg
+    summary = f"Subtotal: ${subtotal:,.2f} | Signs: {len(table_rows)} | Groups: {0 if grp_df.empty else grp_df.shape[0]}"
+    return table_rows, del_opts, group_del_opts, summary, msg
 
 @app.callback(
     Output('bv-building-dropdown','options', allow_duplicate=True),

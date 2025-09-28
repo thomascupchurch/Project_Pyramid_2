@@ -230,7 +230,7 @@ The SQLite database is automatically optimized for OneDrive:
 ```bash
 # Run the application in development mode
 python app.py
-
+**Version**: 1.1.0
 # Test database functions
 python -c "from utils.database import DatabaseManager; db = DatabaseManager(); print('Database OK')"
 
