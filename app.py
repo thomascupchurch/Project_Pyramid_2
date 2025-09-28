@@ -560,6 +560,23 @@ def render_projects_tab():
 
 def render_signs_tab():
     """Render the sign types management tab."""
+    # Preload current sign_types so the table isn't empty if callback hasn't fired yet
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        preload_df = pd.read_sql_query("SELECT name, description, unit_price, material, price_per_sq_ft, width, height FROM sign_types ORDER BY name", conn)
+        # Also preload material pricing so user immediately sees saved materials
+        try:
+            material_df = pd.read_sql_query("SELECT material_name, price_per_sq_ft FROM material_pricing ORDER BY material_name", conn)
+        except Exception as me:
+            print(f"[render_signs_tab][warn] failed preloading material_pricing: {me}")
+            material_df = pd.DataFrame(columns=['material_name','price_per_sq_ft'])
+        conn.close()
+        preload_records = preload_df.to_dict('records')
+        preload_materials = material_df.to_dict('records')
+    except Exception as e:
+        print(f"[render_signs_tab][warn] failed preloading sign_types: {e}")
+        preload_records = []
+        preload_materials = []
     return dbc.Row([
         dbc.Col([
             dbc.Card([
@@ -576,7 +593,7 @@ def render_signs_tab():
                             {"name": "Width", "id": "width", "type": "numeric", "editable": True},
                             {"name": "Height", "id": "height", "type": "numeric", "editable": True}
                         ],
-                        data=[],
+                        data=preload_records,
                         editable=True,
                         row_deletable=True,
                         page_size=10,
@@ -595,7 +612,7 @@ def render_signs_tab():
                             {"name":"Material","id":"material_name","editable":True},
                             {"name":"Price / Sq Ft","id":"price_per_sq_ft","type":"numeric","editable":True}
                         ],
-                        data=[], editable=True, row_deletable=True, page_size=8, style_table={'overflowX':'auto'}
+                        data=preload_materials, editable=True, row_deletable=True, page_size=8, style_table={'overflowX':'auto'}
                     ),
                     dbc.Button('Add Material', id='add-material-btn', color='secondary', className='mt-2 me-2'),
                     dbc.Button('Save Materials', id='save-materials-btn', color='primary', className='mt-2 me-2'),
@@ -603,7 +620,15 @@ def render_signs_tab():
                     html.Div(id='material-pricing-feedback', className='mt-2')
                 ])
             ], className='mt-3')
-        ])
+        ]),
+        dbc.Card([
+            dbc.CardBody(
+                dbc.Row([
+                    dbc.Col(html.Small(id='debug-signs-stats', className='text-muted'), width='auto'),
+                    dbc.Col(dbc.Button('×', id='close-debug-stats', color='link', size='sm', className='p-0 text-decoration-none'), width='auto')
+                ], className='g-2 align-items-center justify-content-between flex-nowrap')
+            )
+        ], id='debug-signs-card', className='mt-2')
     ])
 
 def render_groups_tab():
@@ -664,7 +689,7 @@ def render_groups_tab():
                             {"name": "Group", "id": "group_name"},
                             {"name": "Quantity", "id": "quantity", "type": "numeric"}
                         ],
-                        data=[], editable=True, row_deletable=False, page_size=8, className='mt-2'
+                        data=[], editable=True, row_deletable=False, page_size=8
                     ),
                     dbc.Button('Save Group Quantities', id='building-save-group-qty-btn', color='primary', className='mt-2'),
                     html.Div(id='building-group-save-feedback', className='mt-2')
@@ -747,7 +772,10 @@ def render_import_tab():
                         },
                         multiple=False
                     ),
-                    html.Div(id='upload-output')
+                    html.Div(id='upload-output'),
+                    html.Hr(),
+                    dbc.Button('Import Local Book2.csv', id='import-book2-btn', color='secondary'),
+                    html.Div(id='book2-import-feedback', className='mt-2 text-muted', style={'fontSize':'0.9rem'})
                 ])
             ])
         ])
@@ -780,6 +808,78 @@ def update_output(contents, filename):
             return dbc.Alert(f"Error processing file: {str(e)}", color="danger"), dash.no_update
     
     return html.Div(), dash.no_update
+
+# ----------- Force Import Book2.csv (manual trigger) ------------- #
+def _force_import_book2(csv_path: Path):
+    if not csv_path.exists():
+        raise FileNotFoundError(f"{csv_path} not found")
+    df = pd.read_csv(csv_path)
+    records = []
+    def parse_cost(val):
+        if isinstance(val, str):
+            txt = val.replace('$','').replace(',','').strip()
+            if not txt:
+                return 0.0
+            try:
+                return float(txt)
+            except:
+                return 0.0
+        try:
+            return float(val or 0)
+        except:
+            return 0.0
+    for r in df.to_dict('records'):
+        name = str(r.get('Code') or r.get('Desc') or r.get('full_name') or '').strip()
+        if not name:
+            continue
+        width = r.get('Width') or 0
+        height = r.get('Height') or 0
+        material = r.get('Material2') or r.get('Material') or ''
+        ppsf_raw = r.get('material_multiplier') or r.get('Unnamed: 24') or 0
+        try:
+            ppsf = float(str(ppsf_raw).replace('$','').replace(',','')) if ppsf_raw not in (None,'') else 0.0
+        except:
+            ppsf = 0.0
+        unit_price = parse_cost(r.get('item_cost'))
+        try:
+            if unit_price == 0 and width and height and ppsf:
+                unit_price = float(width) * float(height) * float(ppsf)
+        except:
+            pass
+        records.append((name[:120], str(r.get('Desc') or r.get('full_name') or '')[:255], unit_price, str(material)[:120], ppsf, float(width or 0), float(height or 0)))
+    conn = sqlite3.connect(DATABASE_PATH)
+    cur = conn.cursor()
+    cur.executemany('''
+        INSERT INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height)
+        VALUES (?,?,?,?,?,?,?)
+        ON CONFLICT(name) DO UPDATE SET description=excluded.description,
+            unit_price=excluded.unit_price, material=excluded.material,
+            price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height
+    ''', records)
+    conn.commit()
+    cur.execute('SELECT COUNT(*) FROM sign_types')
+    total = cur.fetchone()[0]
+    conn.close()
+    return len(records), total
+
+@app.callback(
+    Output('book2-import-feedback','children'),
+    Output('signs-table','data', allow_duplicate=True),
+    Input('import-book2-btn','n_clicks'),
+    prevent_initial_call=True
+)
+def manual_import_book2(n):
+    if not n:
+        raise PreventUpdate
+    csv_path = Path('Book2.csv')
+    try:
+        imported, total = _force_import_book2(csv_path)
+        conn = sqlite3.connect(DATABASE_PATH)
+        df = pd.read_sql_query("SELECT name, description, unit_price, material, price_per_sq_ft, width, height FROM sign_types ORDER BY name", conn)
+        conn.close()
+        return dbc.Alert(f"Imported/merged {imported} rows from {csv_path.name}. sign_types now has {total} rows.", color='success'), df.to_dict('records')
+    except Exception as e:
+        return dbc.Alert(f"Import failed: {e}", color='danger'), dash.no_update
 
 # ------------------ Project Creation & Listing ------------------ #
 @app.callback(
@@ -1123,6 +1223,48 @@ def switch_tree_view(mode):
 )
 def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
     triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
+    if 'main-tabs' in triggered and active_tab == 'signs-tab':
+        conn = sqlite3.connect(DATABASE_PATH)
+        df = pd.read_sql_query("SELECT name, description, unit_price, material, price_per_sq_ft, width, height FROM sign_types ORDER BY name", conn)
+        conn.close()
+        return df.to_dict('records'), ''
+    if 'add-sign-btn' in triggered:
+        rows = data_rows or []
+        rows.append({"name":"","description":"","unit_price":0,"material":"","price_per_sq_ft":0,"width":0,"height":0})
+        return rows, 'New row added'
+    if 'signs-table' in triggered and active_tab == 'signs-tab':
+        rows = data_rows or []
+        conn = sqlite3.connect(DATABASE_PATH)
+        cur = conn.cursor()
+        saved = 0
+        cleaned = []
+        for row in rows:
+            name = (row.get('name') or '').strip()
+            if not name:
+                continue
+            def n(v):
+                try: return float(v or 0)
+                except: return 0.0
+            cur.execute('''
+                INSERT INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height)
+                VALUES (?,?,?,?,?,?,?)
+                ON CONFLICT(name) DO UPDATE SET description=excluded.description, unit_price=excluded.unit_price,
+                    material=excluded.material, price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height
+            ''', (
+                name,
+                (row.get('description') or '')[:255],
+                n(row.get('unit_price')),
+                (row.get('material') or '')[:120],
+                n(row.get('price_per_sq_ft')),
+                n(row.get('width')),
+                n(row.get('height'))
+            ))
+            saved += 1
+            cleaned.append(row)
+        conn.commit(); conn.close()
+        return cleaned, f'Saved {saved} rows'
+    raise PreventUpdate
+    triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
     # Load on tab switch
     if 'main-tabs' in triggered and active_tab == 'signs-tab':
         conn = sqlite3.connect(DATABASE_PATH)
@@ -1167,6 +1309,44 @@ def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
         conn.commit(); conn.close()
         return cleaned, f'Saved {saved} rows'
     raise PreventUpdate
+
+# Tiny debug stats updater (tab focused or after save/import) 
+@app.callback(
+    Output('debug-signs-stats','children'),
+    Input('main-tabs','active_tab'),
+    Input('signs-save-status','children'),
+    Input('material-pricing-feedback','children'),
+    prevent_initial_call=True
+)
+def update_debug_stats(active_tab, sign_save_msg, material_msg):
+    if active_tab != 'signs-tab':
+        raise PreventUpdate
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cur = conn.cursor()
+        cur.execute('SELECT COUNT(*) FROM sign_types')
+        sign_count = cur.fetchone()[0]
+        cur.execute('SELECT COUNT(*) FROM material_pricing')
+        mat_count = cur.fetchone()[0]
+        cur.execute("SELECT name FROM sign_types ORDER BY last_modified DESC LIMIT 3")
+        recent_signs = [r[0] for r in cur.fetchall()]
+        cur.execute("SELECT material_name FROM material_pricing ORDER BY last_updated DESC LIMIT 3")
+        recent_mats = [r[0] for r in cur.fetchall()]
+        conn.close()
+        return f"sign_types: {sign_count} (recent: {', '.join(recent_signs) if recent_signs else 'n/a'}) | materials: {mat_count} (recent: {', '.join(recent_mats) if recent_mats else 'n/a'})"
+    except Exception as e:
+        return f"debug error: {e}"
+
+# Allow closing the debug card
+@app.callback(
+    Output('debug-signs-card','style'),
+    Input('close-debug-stats','n_clicks'),
+    prevent_initial_call=True
+)
+def hide_debug_card(n):
+    if not n:
+        raise PreventUpdate
+    return {'display':'none'}
 
 # ------------------ Material Pricing CRUD & Recalc ------------------ #
 @app.callback(
