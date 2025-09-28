@@ -45,11 +45,16 @@ class DatabaseManager:
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 description TEXT,
+                material_alt TEXT,
                 unit_price REAL DEFAULT 0.0,
                 material TEXT,
                 price_per_sq_ft REAL DEFAULT 0.0,
                 width REAL DEFAULT 0.0,
                 height REAL DEFAULT 0.0,
+                material_multiplier REAL DEFAULT 0.0,
+                install_type TEXT,
+                install_time_hours REAL DEFAULT 0.0,
+                per_sign_install_rate REAL DEFAULT 0.0,
                 last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''',
             '''CREATE TABLE IF NOT EXISTS sign_groups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -86,6 +91,27 @@ class DatabaseManager:
         ]
         for stmt in statements:
             cursor.execute(stmt)
+        # Lightweight migrations: add new columns if they don't exist
+        existing_cols = set()
+        try:
+            cursor.execute('PRAGMA table_info(sign_types)')
+            for row in cursor.fetchall():
+                existing_cols.add(row[1])
+        except Exception:
+            pass
+        migrations = [
+            ('material_alt','ALTER TABLE sign_types ADD COLUMN material_alt TEXT'),
+            ('material_multiplier','ALTER TABLE sign_types ADD COLUMN material_multiplier REAL DEFAULT 0.0'),
+            ('install_type','ALTER TABLE sign_types ADD COLUMN install_type TEXT'),
+            ('install_time_hours','ALTER TABLE sign_types ADD COLUMN install_time_hours REAL DEFAULT 0.0'),
+            ('per_sign_install_rate','ALTER TABLE sign_types ADD COLUMN per_sign_install_rate REAL DEFAULT 0.0')
+        ]
+        for col, sql in migrations:
+            if col not in existing_cols:
+                try:
+                    cursor.execute(sql)
+                except Exception:
+                    pass
         conn.commit(); conn.close()
     
     def import_csv_data(self, csv_file_path, table_mapping=None):

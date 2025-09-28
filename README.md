@@ -51,6 +51,52 @@ A modern Python web application for sign manufacturing cost estimation and proje
    pip install -r requirements.txt
    ```
 
+## Windows / OneDrive Deployment (Team Use)
+
+1. Place the whole project folder inside the shared OneDrive directory your coworkers can access.
+2. Ask coworkers to double‑click `start_windows.bat` (it will create a local `.venv` beside the code and install dependencies). The first run may take a couple minutes; subsequent runs are fast.
+3. The app will start on `http://localhost:8050` by default. To allow another machine on the LAN to reach it change env vars:
+   - `SIGN_APP_HOST=0.0.0.0`
+   - Optionally set `SIGN_APP_PORT=8060` (or another free port)
+     You can put these in a file named `.env` (future enhancement) or prefix when launching:
+     `SIGN_APP_PORT=8060 python app.py`
+4. Share the host machine's LAN IP (e.g. `http://192.168.1.25:8050`) with coworkers; they can bookmark it.
+
+### Recommended Workflow
+
+| Action                                | Person          | Notes                                      |
+| ------------------------------------- | --------------- | ------------------------------------------ |
+| Enter / modify sign types & materials | Estimating lead | Done once then occasional updates          |
+| Create project & buildings            | PM / Estimator  | Keep names consistent, they drive grouping |
+| Assign sign groups & direct signs     | PM / Estimator  | Use groups for recurring bundles           |
+| Generate building or project estimate | PM / Sales      | Use new building filter to narrow scope    |
+| Export to Excel                       | Sales           | File saved locally after browser download  |
+
+### OneDrive / SQLite Tips
+
+- Keep the database file `sign_estimation.db` in the shared folder; SQLite WAL mode (enabled in code) reduces file locking issues.
+- Avoid opening the database simultaneously with external tools while app is running.
+- Backups: run `python scripts/backup_db.py` periodically (or copy the file) – creates timestamped copies under `backups/`.
+
+### Performance & Stability
+
+- Local LAN + small user count (<10) is fine with SQLite.
+- If you observe locking (rare): ensure only one app instance writes at a time; readers are safe.
+- Material price recalculation is manual (button) to keep UI responsive.
+
+### Customization via Environment Variables
+
+| Variable       | Purpose                            | Default            |
+| -------------- | ---------------------------------- | ------------------ |
+| SIGN_APP_DB    | Path to DB file                    | sign_estimation.db |
+| SIGN_APP_PORT  | HTTP port                          | 8050               |
+| SIGN_APP_HOST  | Bind address (0.0.0.0 for LAN)     | 127.0.0.1          |
+| SIGN_APP_DEBUG | Dash debug mode (1/true to enable) | 0                  |
+
+### Security Note
+
+LAN deployment here is plain HTTP inside your internal network. Do not expose directly to the public Internet without adding auth / HTTPS reverse proxy.
+
 3. **Run the Application (macOS/Linux)**:
    ```bash
    # One-off

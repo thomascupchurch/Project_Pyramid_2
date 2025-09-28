@@ -12,8 +12,8 @@ class CostCalculator:
         self.db_path = db_path
     
     def calculate_sign_cost(self, sign_type_id: int, quantity: int = 1, 
-                           custom_dimensions: Tuple[float, float] = None,
-                           custom_material: str = None) -> Dict:
+                           custom_dimensions: Optional[Tuple[float, float]] = None,
+                           custom_material: Optional[str] = None) -> Dict:
         """
         Calculate cost for individual signs with multiple pricing methods.
         
@@ -99,6 +99,82 @@ class CostCalculator:
             'quantity': quantity,
             'cost_methods': cost_methods
         }
+
+    def get_best_cost_method(self, cost_methods: Dict) -> Optional[Dict]:
+        """Return the preferred cost method from a cost_methods mapping.
+
+        Priority order (business rule):
+            1. unit_price (explicit stored price)
+            2. sq_ft_material (material pricing table)
+            3. sq_ft_sign (price_per_sq_ft stored on sign)
+        Falls back to first available if none of the priority keys present.
+        Returns None if mapping empty.
+        """
+        priority = ['unit_price', 'sq_ft_material', 'sq_ft_sign']
+        for key in priority:
+            if key in cost_methods:
+                return cost_methods[key]
+        # Fallback
+        if cost_methods:
+            # Return deterministic first (sorted by key for stability)
+            first_key = sorted(cost_methods.keys())[0]
+            return cost_methods[first_key]
+        return None
+
+# ------------------ Helper Functions Used by App Callbacks ------------------ #
+def compute_unit_price(row: Dict, price_mode: str) -> float:
+    """Compute unit price for a sign or group member based on pricing mode.
+
+    Precedence for per_area mode: price_per_sq_ft > material_multiplier.
+    Falls back to unit_price if per_area requirements not satisfied.
+    """
+    def _f(v):
+        try:
+            return float(v or 0)
+        except Exception:
+            return 0.0
+    if price_mode == 'per_area':
+        width = _f(row.get('width'))
+        height = _f(row.get('height'))
+        area = width * height if width and height else 0
+        if area > 0:
+            ppsf = _f(row.get('price_per_sq_ft'))
+            if ppsf <= 0:
+                # fallback to material_multiplier if provided
+                ppsf = _f(row.get('material_multiplier'))
+            if ppsf > 0:
+                return area * ppsf
+    return _f(row.get('unit_price'))
+
+def compute_install_cost(install_mode: str,
+                         grand_subtotal: float,
+                         total_sign_count: float,
+                         total_area: float,
+                         inst_percent: float,
+                         inst_per_sign: float,
+                         inst_per_area: float,
+                         inst_hours: float,
+                         inst_hourly: float,
+                         auto_enabled: bool,
+                         auto_install_amount_per_sign: float,
+                         auto_install_hours: float) -> float:
+    """Centralized installation cost computation with auto fallback handling."""
+    install_cost = 0.0
+    if install_mode == 'percent':
+        install_cost = grand_subtotal * (inst_percent/100.0)
+    elif install_mode == 'per_sign':
+        if inst_per_sign > 0:
+            install_cost = total_sign_count * inst_per_sign
+        elif auto_enabled and auto_install_amount_per_sign > 0:
+            install_cost = auto_install_amount_per_sign
+    elif install_mode == 'per_area':
+        install_cost = total_area * inst_per_area
+    elif install_mode == 'hours':
+        if inst_hours > 0:
+            install_cost = inst_hours * inst_hourly
+        elif auto_enabled and auto_install_hours > 0:
+            install_cost = auto_install_hours * inst_hourly
+    return install_cost
     
     def calculate_group_cost(self, group_id: int, quantity: int = 1) -> Dict:
         """Calculate cost for sign groups."""
