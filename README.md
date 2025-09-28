@@ -253,3 +253,82 @@ This application is proprietary software developed for internal use by the sign 
 **Last Updated**: September 2025  
 **Version**: 1.0.0  
 **Compatibility**: Windows 10/11, Python 3.8+, Microsoft 365
+
+---
+
+## 🔄 CRUD Workflows (Quick Reference)
+
+### Sign Types
+
+1. Go to the "Sign Types" tab
+2. Edit cells directly (Name is required and acts as a unique key)
+3. Add a new blank row with "Add New Sign Type"
+4. Any edit triggers automatic persistence (ON CONFLICT upsert)
+
+Auto-calculation: If you later recalc material pricing, unit_price is overwritten for rows with width/height > 0.
+
+### Material Pricing
+
+1. In "Sign Types" tab, use Material Pricing card
+2. Add or edit material rows (material name is unique, case-insensitive)
+3. Click "Save Materials" to persist
+4. Click "Recalculate Sign Prices" to update sign_types.unit_price and price_per_sq_ft
+
+### Sign Groups
+
+1. Go to "Sign Groups" tab
+2. Create or edit a group (name unique). Saving performs upsert on description
+3. Select a group to manage its members
+4. Add sign memberships with quantity; save member changes
+
+### Assign Groups to Buildings
+
+1. Choose a project and then a building
+2. Select a group and quantity; add/assign
+3. Adjust quantities inline and Save Group Quantities
+
+### Buildings & Individual Signs
+
+1. In "Projects" tab assign project, create buildings
+2. Add sign types with quantity to selected building
+3. Adjust quantities inline then "Save Quantity Changes"
+
+### Estimates & Export
+
+1. In "Estimates" tab choose a project
+2. Generate Estimate (enables Export button automatically)
+3. Export builds an Excel file (with logo if CairoSVG installed)
+4. On export failure an error workbook is returned with cause noted
+
+## 🧪 Health / Export Test (Example)
+
+Add a pytest similar to:
+
+```python
+def test_export_basic(tmp_path):
+   from utils.database import DatabaseManager
+   import pandas as pd, sqlite3, os
+   db = tmp_path / 'test.db'
+   dm = DatabaseManager(str(db))
+   # Insert minimal project + building + sign
+   conn = sqlite3.connect(db)
+   cur = conn.cursor()
+   cur.execute("INSERT INTO projects (name) VALUES ('TestProj')")
+   project_id = cur.lastrowid
+   cur.execute("INSERT INTO buildings (project_id, name) VALUES (?, 'B1')", (project_id,))
+   cur.execute("INSERT INTO sign_types (name, unit_price) VALUES ('SignA', 10.0)")
+   cur.execute("INSERT INTO building_signs (building_id, sign_type_id, quantity) VALUES (1,1,2)")
+   conn.commit(); conn.close()
+   est = dm.get_project_estimate(project_id)
+   assert est and est[0]['Item'] == 'SignA'
+```
+
+## 🛠️ CLI Utilities
+
+Price Recalculation without UI:
+
+```bash
+python scripts/recalc_prices.py --db sign_estimation.db
+```
+
+This updates unit_price for all sign_types whose material matches material_pricing and width/height > 0.

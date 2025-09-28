@@ -11,6 +11,7 @@ from dash import html, dcc, Input, Output, State, callback_context, dash_table
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import plotly.express as px
+import dash_cytoscape as cyto
 import pandas as pd
 import sqlite3
 from datetime import datetime
@@ -111,9 +112,30 @@ def _load_sign_types_from_df(df: pd.DataFrame) -> int:
                 norm_df[target] = 0
             else:
                 norm_df[target] = ''
+    # Coerce numeric-like strings
+    def _coerce_numeric(val):
+        if pd.isna(val):
+            return 0
+        if isinstance(val,(int,float)):
+            return val
+        if isinstance(val,str):
+            txt = val.strip().replace('$','').replace(',','')
+            try:
+                return float(txt) if txt else 0
+            except:
+                return 0
+        try:
+            return float(val)
+        except:
+            return 0
+    for _c in ['unit_price','width','height','price_per_sq_ft']:
+        norm_df[_c] = norm_df[_c].apply(_coerce_numeric)
     # Compute price_per_sq_ft if absent but width/height/unit_price present
     calc_mask = (norm_df['price_per_sq_ft']==0) & (norm_df['width']>0) & (norm_df['height']>0) & (norm_df['unit_price']>0)
     norm_df.loc[calc_mask,'price_per_sq_ft'] = norm_df.loc[calc_mask].apply(lambda r: (r['unit_price'] / (r['width']*r['height'])) if r['width']*r['height'] else 0, axis=1)
+    # Drop duplicates (case-insensitive name) keeping first
+    norm_df['__name_key'] = norm_df['name'].astype(str).str.strip().str.lower()
+    norm_df = norm_df.drop_duplicates('__name_key')
     # Upsert rows
     conn = sqlite3.connect(DATABASE_PATH)
     cur = conn.cursor()
@@ -169,6 +191,64 @@ def auto_load_initial_sign_types():
 _loaded_count, _loaded_source = auto_load_initial_sign_types()
 if _loaded_count:
     print(f"Auto-initialized sign_types with {_loaded_count} rows from {_loaded_source}")
+
+# Attempt secondary import from Book2.csv if dataset appears empty/minimal
+def _attempt_import_book2():
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cur = conn.cursor()
+        cur.execute("SELECT COUNT(*) FROM sign_types")
+        count = cur.fetchone()[0]
+        conn.close()
+        if count > 5:
+            return
+        csv_path = Path('Book2.csv')
+        if not csv_path.exists():
+            return
+        print('[startup] Importing Book2.csv into sign_types...')
+        import pandas as pd
+        df = pd.read_csv(csv_path)
+        # Normalize columns -> best effort mapping
+        def parse_cost(val):
+            if isinstance(val, str):
+                return float(val.replace('$','').replace(',','') or 0) if any(ch.isdigit() for ch in val) else 0.0
+            try: return float(val or 0)
+            except: return 0.0
+        records = []
+        for r in df.to_dict('records'):
+            name = str(r.get('Code') or r.get('Desc') or r.get('full_name') or '').strip()
+            if not name:
+                continue
+            width = r.get('Width') or 0
+            height = r.get('Height') or 0
+            material = r.get('Material2') or r.get('Material') or ''
+            # Derive price_per_sq_ft from 'Unnamed: 24' if numeric else material_multiplier
+            ppsf_raw = r.get('Unnamed: 24') or r.get('material_multiplier') or 0
+            try: ppsf = float(str(ppsf_raw).replace('$','').replace(',','')) if ppsf_raw not in (None,'') else 0.0
+            except: ppsf = 0.0
+            # Unit price attempt: item_cost if present else (width*height*ppsf)
+            unit_price = parse_cost(r.get('item_cost'))
+            try:
+                if unit_price == 0 and width and height and ppsf:
+                    unit_price = float(width) * float(height) * float(ppsf)
+            except: pass
+            records.append((name[:120], str(r.get('Desc') or r.get('full_name') or '')[:255], unit_price, str(material)[:120], ppsf, float(width or 0), float(height or 0)))
+        conn = sqlite3.connect(DATABASE_PATH)
+        cur = conn.cursor()
+        cur.executemany('''
+            INSERT INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height)
+            VALUES (?,?,?,?,?,?,?)
+            ON CONFLICT(name) DO UPDATE SET description=excluded.description,
+                unit_price=excluded.unit_price, material=excluded.material,
+                price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height
+        ''', records)
+        conn.commit()
+        conn.close()
+        print(f'[startup] Imported/merged {len(records)} sign types from Book2.csv')
+    except Exception as e:
+        print(f'[startup][warn] Book2.csv import skipped: {e}')
+
+_attempt_import_book2()
 
 # (Removed duplicate inline schema function; schema managed by utils/database.py)
 
@@ -370,10 +450,12 @@ def render_projects_tab():
             dbc.Card([
                 dbc.CardHeader(html.H4("Project Tree Visualization")),
                 dbc.CardBody([
-                    dcc.Graph(
-                        id="project-tree",
-                        figure=create_tree_visualization()
-                    )
+                    dbc.RadioItems(
+                        id='tree-view-mode',
+                        options=[{'label':'Static','value':'static'},{'label':'Interactive','value':'cyto'}],
+                        value='static', inline=True, className='mb-2'
+                    ),
+                    html.Div(id='project-tree-wrapper', children=dcc.Graph(id='project-tree', figure=create_tree_visualization()))
                 ])
             ]),
             dbc.Card([
@@ -434,6 +516,10 @@ def render_projects_tab():
                 dbc.CardBody([
                     dbc.Form([
                         dbc.Row([
+                            dbc.Label("Edit Existing", width=4),
+                            dbc.Col(dcc.Dropdown(id='project-edit-dropdown', placeholder='Select project to edit'), width=8)
+                        ], className="mb-3"),
+                        dbc.Row([
                             dbc.Label("Project Name", width=4),
                             dbc.Col(dbc.Input(id="project-name-input", type="text"), width=8)
                         ], className="mb-3"),
@@ -457,7 +543,10 @@ def render_projects_tab():
                             dbc.Label("Include Sales Tax?", width=4),
                             dbc.Col(dbc.Checklist(id="include-sales-tax-input", options=[{"label": "Yes", "value": 1}], value=[1]), width=8)
                         ], className="mb-3"),
-                        dbc.Button("Create Project", id="create-project-btn", color="primary", className="w-100")
+                        dbc.Row([
+                            dbc.Col(dbc.Button("Create Project", id="create-project-btn", color="primary", className="w-100"), width=6),
+                            dbc.Col(dbc.Button("Update Project", id="update-project-btn", color="secondary", className="w-100"), width=6)
+                        ])
                     ])
                 ])
             ], className="mb-3"),
@@ -496,17 +585,92 @@ def render_signs_tab():
                     dbc.Button("Add New Sign Type", id="add-sign-btn", color="success", className="mt-3 me-2"),
                     dbc.Badge(id="signs-save-status", color="secondary", className="ms-2")
                 ])
-            ])
+            ]),
+            dbc.Card([
+                dbc.CardHeader(html.H5("Material Pricing")),
+                dbc.CardBody([
+                    dash_table.DataTable(
+                        id='material-pricing-table',
+                        columns=[
+                            {"name":"Material","id":"material_name","editable":True},
+                            {"name":"Price / Sq Ft","id":"price_per_sq_ft","type":"numeric","editable":True}
+                        ],
+                        data=[], editable=True, row_deletable=True, page_size=8, style_table={'overflowX':'auto'}
+                    ),
+                    dbc.Button('Add Material', id='add-material-btn', color='secondary', className='mt-2 me-2'),
+                    dbc.Button('Save Materials', id='save-materials-btn', color='primary', className='mt-2 me-2'),
+                    dbc.Button('Recalculate Sign Prices', id='recalc-sign-prices-btn', color='warning', className='mt-2'),
+                    html.Div(id='material-pricing-feedback', className='mt-2')
+                ])
+            ], className='mt-3')
         ])
     ])
 
 def render_groups_tab():
     """Render the sign groups management tab."""
+    # Preload sign types & groups
+    conn = sqlite3.connect(DATABASE_PATH)
+    sign_types_df = pd.read_sql_query("SELECT id, name FROM sign_types ORDER BY name", conn)
+    groups_df = pd.read_sql_query("SELECT id, name FROM sign_groups ORDER BY name", conn)
+    conn.close()
+    sign_type_options = [{"label": r.name, "value": r.id} for r in sign_types_df.itertuples()]
+    group_options = [{"label": r.name, "value": r.id} for r in groups_df.itertuples()]
     return dbc.Row([
         dbc.Col([
-            html.H4("Sign Groups Management"),
-            html.P("Create and manage sign groups here.")
-        ])
+            dbc.Card([
+                dbc.CardHeader(html.H5("Create / Edit Group")),
+                dbc.CardBody([
+                    dbc.Input(id='group-name-input', placeholder='Group name'),
+                    dbc.Textarea(id='group-desc-input', placeholder='Description', className='mt-2', style={'height': '60px'}),
+                    dbc.Button('Save Group', id='save-group-btn', color='primary', className='mt-2 w-100'),
+                    html.Div(id='group-save-feedback', className='mt-2')
+                ])
+            ]),
+            dbc.Card([
+                dbc.CardHeader(html.H5("Existing Groups")),
+                dbc.CardBody([
+                    dcc.Dropdown(id='group-select-dropdown', options=group_options, placeholder='Select group'),
+                    dash_table.DataTable(
+                        id='group-members-table',
+                        columns=[
+                            {"name": "Sign", "id": "sign_name"},
+                            {"name": "Quantity", "id": "quantity", "type": "numeric"}
+                        ],
+                        data=[], editable=True, row_deletable=True, page_size=8, style_table={'overflowX': 'auto'}
+                    ),
+                    dbc.Row([
+                        dbc.Col(dcc.Dropdown(id='group-add-sign-dropdown', options=sign_type_options, placeholder='Add sign type'), width=7),
+                        dbc.Col(dbc.Input(id='group-add-sign-qty', type='number', min=1, value=1), width=3),
+                        dbc.Col(dbc.Button('Add', id='group-add-sign-btn', color='success', className='w-100'), width=2)
+                    ], className='mt-2 g-2'),
+                    dbc.Button('Save Member Changes', id='group-save-members-btn', color='secondary', className='mt-2'),
+                    html.Div(id='group-members-feedback', className='mt-2')
+                ])
+            ], className='mt-3')
+        ], width=6),
+        dbc.Col([
+            dbc.Card([
+                dbc.CardHeader(html.H5("Assign Groups to Building")),
+                dbc.CardBody([
+                    dcc.Dropdown(id='group-assign-project-dropdown', placeholder='Select project'),
+                    dcc.Dropdown(id='group-assign-building-dropdown', placeholder='Select building', className='mt-2'),
+                    dcc.Dropdown(id='group-assign-group-dropdown', options=group_options, placeholder='Select group', className='mt-2'),
+                    dbc.Input(id='group-assign-qty', type='number', min=1, value=1, className='mt-2'),
+                    dbc.Button('Add Group to Building', id='group-assign-btn', color='success', className='mt-2 w-100'),
+                    html.Div(id='group-assign-feedback', className='mt-2'),
+                    dash_table.DataTable(
+                        id='building-groups-table',
+                        columns=[
+                            {"name": "Group", "id": "group_name"},
+                            {"name": "Quantity", "id": "quantity", "type": "numeric"}
+                        ],
+                        data=[], editable=True, row_deletable=False, page_size=8, className='mt-2'
+                    ),
+                    dbc.Button('Save Group Quantities', id='building-save-group-qty-btn', color='primary', className='mt-2'),
+                    html.Div(id='building-group-save-feedback', className='mt-2')
+                ])
+            ])
+        ], width=6)
     ])
 
 def render_estimates_tab():
@@ -623,6 +787,7 @@ def update_output(contents, filename):
     Output('project-create-feedback', 'children'),
     Output('project-tree', 'figure', allow_duplicate=True),
     Output('assign-project-dropdown', 'options'),
+    Output('project-edit-dropdown', 'options'),
     Input('create-project-btn', 'n_clicks'),
     State('project-name-input', 'value'),
     State('project-desc-input', 'value'),
@@ -635,8 +800,14 @@ def update_output(contents, filename):
 def create_or_refresh_projects(n_clicks, name, desc, sales_tax, install_rate, include_install_values, include_tax_values):
     if not n_clicks:
         raise PreventUpdate
-    if not name:
-        return dash.no_update, dbc.Alert("Project name required", color='danger'), dash.no_update, dash.no_update
+    if not name:  # early validation
+        return (
+            dash.no_update,
+            dbc.Alert("Project name required", color='danger'),
+            dash.no_update,
+            dash.no_update,
+            dash.no_update,
+        )
     try:
         conn = sqlite3.connect(DATABASE_PATH)
         cur = conn.cursor()
@@ -661,11 +832,61 @@ def create_or_refresh_projects(n_clicks, name, desc, sales_tax, install_rate, in
             project_options = [{"label": r.name, "value": r.id} for r in df.itertuples()]
         tree_fig = create_tree_visualization()
         feedback = dbc.Alert(f"Project '{name}' created", color='success', dismissable=True)
-        return list_children, feedback, tree_fig, project_options
+        return list_children, feedback, tree_fig, project_options, project_options
     except sqlite3.IntegrityError:
-        return dash.no_update, dbc.Alert(f"Project '{name}' already exists", color='warning'), dash.no_update, dash.no_update
+        return dash.no_update, dbc.Alert(f"Project '{name}' already exists", color='warning'), dash.no_update, dash.no_update, dash.no_update
     except Exception as e:
-        return dash.no_update, dbc.Alert(f"Error: {e}", color='danger'), dash.no_update, dash.no_update
+        return dash.no_update, dbc.Alert(f"Error: {e}", color='danger'), dash.no_update, dash.no_update, dash.no_update
+
+@app.callback(
+    Output('project-name-input','value'),
+    Output('project-desc-input','value'),
+    Output('sales-tax-input','value'),
+    Output('installation-rate-input','value'),
+    Output('include-installation-input','value'),
+    Output('include-sales-tax-input','value'),
+    Input('project-edit-dropdown','value'),
+    prevent_initial_call=True
+)
+def load_project_for_edit(project_id):
+    if not project_id:
+        raise PreventUpdate
+    conn = sqlite3.connect(DATABASE_PATH)
+    df = pd.read_sql_query('SELECT * FROM projects WHERE id=?', conn, params=(project_id,))
+    conn.close()
+    if df.empty:
+        raise PreventUpdate
+    r = df.iloc[0]
+    return r['name'], r.get('description',''), round((r.get('sales_tax_rate') or 0)*100,4), round((r.get('installation_rate') or 0)*100,4), ([1] if r.get('include_installation') else []), ([1] if r.get('include_sales_tax') else [])
+
+@app.callback(
+    Output('project-create-feedback','children', allow_duplicate=True),
+    Output('project-tree','figure', allow_duplicate=True),
+    Input('update-project-btn','n_clicks'),
+    State('project-edit-dropdown','value'),
+    State('project-name-input','value'),
+    State('project-desc-input','value'),
+    State('sales-tax-input','value'),
+    State('installation-rate-input','value'),
+    State('include-installation-input','value'),
+    State('include-sales-tax-input','value'),
+    prevent_initial_call=True
+)
+def update_project(n_clicks, project_id, name, desc, sales_tax, install_rate, include_install_values, include_tax_values):
+    if not n_clicks:
+        raise PreventUpdate
+    if not project_id or not name:
+        return dbc.Alert('Select project and ensure name present', color='danger'), dash.no_update
+    conn = sqlite3.connect(DATABASE_PATH)
+    cur = conn.cursor()
+    cur.execute('''UPDATE projects SET name=?, description=?, sales_tax_rate=?, installation_rate=?, include_installation=?, include_sales_tax=?, last_modified=CURRENT_TIMESTAMP WHERE id=?''', (
+        name.strip(), desc or '', float(sales_tax or 0)/100.0, float(install_rate or 0)/100.0,
+        1 if (include_install_values and 1 in include_install_values) else 0,
+        1 if (include_tax_values and 1 in include_tax_values) else 0,
+        project_id
+    ))
+    conn.commit(); conn.close()
+    return dbc.Alert('Project updated', color='success'), create_tree_visualization()
 
 # ------------------ Building Management & Sign Assignment ------------------ #
 @app.callback(
@@ -702,6 +923,11 @@ def add_building(n_clicks, project_id, name, desc):
         return dash.no_update, "Select project and enter name", dash.no_update
     conn = sqlite3.connect(DATABASE_PATH)
     cur = conn.cursor()
+    # Duplicate name check (case-insensitive) within project
+    cur.execute("SELECT 1 FROM buildings WHERE project_id=? AND LOWER(name)=LOWER(?)", (project_id, name.strip()))
+    if cur.fetchone():
+        conn.close()
+        return dash.no_update, f"Building name '{name}' already exists", dash.no_update
     cur.execute("INSERT INTO buildings (project_id, name, description) VALUES (?,?,?)", (project_id, name.strip(), desc or ''))
     conn.commit()
     buildings = pd.read_sql_query("SELECT id, name FROM buildings WHERE project_id = ? ORDER BY id", conn, params=(project_id,))
@@ -742,7 +968,7 @@ def manage_building_signs(building_id, add_clicks, save_clicks, sign_type_id, qt
     conn = sqlite3.connect(DATABASE_PATH)
     cur = conn.cursor()
     if 'add-sign-to-building-btn' in triggered and sign_type_id:
-        qty = int(qty or 1)
+        qty = max(1, int(qty or 1))
         cur.execute("SELECT id, quantity FROM building_signs WHERE building_id=? AND sign_type_id=?", (building_id, sign_type_id))
         existing = cur.fetchone()
         if existing:
@@ -753,7 +979,7 @@ def manage_building_signs(building_id, add_clicks, save_clicks, sign_type_id, qt
     elif 'save-building-signs-btn' in triggered and current_rows:
         for row in current_rows:
             name = row.get('sign_name')
-            q = int(row.get('quantity') or 0)
+            q = max(0, int(row.get('quantity') or 0))
             cur.execute("SELECT id FROM sign_types WHERE name = ?", (name,))
             st_row = cur.fetchone()
             if not st_row:
@@ -806,15 +1032,85 @@ def export_estimate(n_clicks, project_id):
         raise PreventUpdate
     if not project_id:
         return dash.no_update
-    estimate_data = db_manager.get_project_estimate(project_id) or []
-    if not estimate_data:
-        return dash.no_update
-    df = pd.DataFrame(estimate_data)
-    buffer = io.BytesIO()
-    with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
-        df.to_excel(writer, index=False, sheet_name='Estimate')
-    buffer.seek(0)
-    return dict(content=base64.b64encode(buffer.read()).decode(), filename=f'project_{project_id}_estimate.xlsx', type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    try:
+        estimate_data = db_manager.get_project_estimate(project_id) or []
+        if not estimate_data:
+            return dash.no_update
+        df = pd.DataFrame(estimate_data)
+        buffer = io.BytesIO()
+        from openpyxl.drawing.image import Image as XLImage
+        from tempfile import NamedTemporaryFile
+        logo_path = Path('assets') / 'LSI_Logo.svg'
+        try:
+            import cairosvg  # optional dependency
+        except Exception:
+            cairosvg = None
+        with pd.ExcelWriter(buffer, engine='openpyxl') as writer:
+            df.to_excel(writer, index=False, sheet_name='Estimate')
+            wb = writer.book
+            ws = wb['Estimate']
+            # Insert branding header above table
+            ws.insert_rows(1, amount=4)
+            ws.merge_cells('A1:D3')
+            ws['A1'] = 'Sign Estimation Project Export'
+            # Safely copy font/alignment if row 5 exists
+            try:
+                base_font = ws['A5'].font
+                base_align = ws['A5'].alignment
+            except Exception:
+                base_font = ws['A1'].font
+                base_align = ws['A1'].alignment
+            ws['A1'].font = base_font.copy(bold=True)
+            ws['A1'].alignment = base_align.copy(horizontal='left', vertical='center', wrap_text=True)
+            if cairosvg and logo_path.exists():
+                try:
+                    with NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+                        png_temp = tmp.name
+                    cairosvg.svg2png(url=str(logo_path), write_to=png_temp, output_width=240)
+                    img = XLImage(png_temp)
+                    img.anchor = 'E1'
+                    ws.add_image(img)
+                except Exception:
+                    pass
+        buffer.seek(0)
+        return dict(content=base64.b64encode(buffer.read()).decode(), filename=f'project_{project_id}_estimate.xlsx', type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+    except Exception as e:
+        print(f"[export][error] {e}")
+        err_buf = io.BytesIO()
+        with pd.ExcelWriter(err_buf, engine='openpyxl') as writer:
+            pd.DataFrame([{"Error": str(e)}]).to_excel(writer, index=False, sheet_name='Error')
+        err_buf.seek(0)
+        return dict(content=base64.b64encode(err_buf.read()).decode(), filename=f'project_{project_id}_export_error.xlsx', type='application/vnd.openxmlformats-officedocument.spreadsheetml.sheet')
+
+# ------------------ Tree View Mode Switch (Cytoscape) ------------------ #
+@app.callback(
+    Output('project-tree-wrapper','children'),
+    Input('tree-view-mode','value'),
+    prevent_initial_call=True
+)
+def switch_tree_view(mode):
+    if mode == 'cyto':
+        nodes = get_project_tree_data()
+        # Build Cytoscape elements
+        elements = []
+        id_map = {}
+        for n in nodes:
+            elements.append({'data': {'id': n['id'], 'label': n['label']}, 'classes': n['type']})
+            id_map[n['id']] = n
+        # Add edges based on parent field
+        for n in nodes:
+            parent = n.get('parent')
+            if parent and parent in id_map:
+                elements.append({'data': {'source': parent, 'target': n['id']}})
+        stylesheet = [
+            {'selector': 'node','style': {'content':'data(label)','text-valign':'center','color':'#fff','font-size':'10px','background-color':'#4a90e2'}},
+            {'selector': '.project','style': {'background-color':'#1f77b4'}},
+            {'selector': '.building','style': {'background-color':'#ff7f0e'}},
+            {'selector': '.sign','style': {'background-color':'#2ca02c'}},
+            {'selector': 'edge','style': {'width':2,'line-color':'#ccc'}}
+        ]
+        return cyto.Cytoscape(id='project-tree-cyto', elements=elements, layout={'name':'breadthfirst','directed':True,'spacingFactor':1.2}, style={'width':'100%','height':'600px'}, stylesheet=stylesheet)
+    return dcc.Graph(id='project-tree', figure=create_tree_visualization())
 
 # ------------------ Sign Types Table CRUD ------------------ #
 @app.callback(
@@ -827,50 +1123,266 @@ def export_estimate(n_clicks, project_id):
 )
 def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
     triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
+    # Load on tab switch
     if 'main-tabs' in triggered and active_tab == 'signs-tab':
         conn = sqlite3.connect(DATABASE_PATH)
         df = pd.read_sql_query("SELECT name, description, unit_price, material, price_per_sq_ft, width, height FROM sign_types ORDER BY name", conn)
         conn.close()
-        return df.to_dict('records'), "Loaded"
-    # Add a blank row
+        return df.to_dict('records'), ''
+    # Add row
     if 'add-sign-btn' in triggered:
         rows = data_rows or []
         rows.append({"name": "", "description": "", "unit_price": 0, "material": "", "price_per_sq_ft": 0, "width": 0, "height": 0})
-        return rows, "Row added"
-    # Persist edits
+        return rows, 'New row added'
+    # Persist edits (data_timestamp fires after user edits) -> identify via 'signs-table'
     if 'signs-table' in triggered and active_tab == 'signs-tab':
         rows = data_rows or []
         conn = sqlite3.connect(DATABASE_PATH)
         cur = conn.cursor()
         saved = 0
+        cleaned = []
         for row in rows:
             name = (row.get('name') or '').strip()
             if not name:
                 continue
+            def n(v):
+                try: return float(v or 0)
+                except: return 0.0
             cur.execute('''
                 INSERT INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height)
                 VALUES (?,?,?,?,?,?,?)
-                ON CONFLICT(name) DO UPDATE SET
-                  description=excluded.description,
-                  unit_price=excluded.unit_price,
-                  material=excluded.material,
-                  price_per_sq_ft=excluded.price_per_sq_ft,
-                  width=excluded.width,
-                  height=excluded.height
+                ON CONFLICT(name) DO UPDATE SET description=excluded.description, unit_price=excluded.unit_price,
+                    material=excluded.material, price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height
             ''', (
                 name,
-                row.get('description') or '',
-                float(row.get('unit_price') or 0),
-                row.get('material') or '',
-                float(row.get('price_per_sq_ft') or 0),
-                float(row.get('width') or 0),
-                float(row.get('height') or 0)
+                (row.get('description') or '')[:255],
+                n(row.get('unit_price')),
+                (row.get('material') or '')[:120],
+                n(row.get('price_per_sq_ft')),
+                n(row.get('width')),
+                n(row.get('height'))
             ))
             saved += 1
-        conn.commit()
-        conn.close()
-        return rows, f"Saved {saved}" if saved else "No changes"
+            cleaned.append(row)
+        conn.commit(); conn.close()
+        return cleaned, f'Saved {saved} rows'
     raise PreventUpdate
+
+# ------------------ Material Pricing CRUD & Recalc ------------------ #
+@app.callback(
+    Output('material-pricing-table','data'),
+    Output('material-pricing-feedback','children'),
+    Input('main-tabs','active_tab'),
+    Input('add-material-btn','n_clicks'),
+    Input('save-materials-btn','n_clicks'),
+    Input('recalc-sign-prices-btn','n_clicks'),
+    State('material-pricing-table','data'),
+    prevent_initial_call=True
+)
+def manage_material_pricing(active_tab, add_clicks, save_clicks, recalc_clicks, rows):
+    triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
+    if 'main-tabs' in triggered and active_tab == 'signs-tab':
+        conn = sqlite3.connect(DATABASE_PATH)
+        try:
+            df = pd.read_sql_query("SELECT material_name, price_per_sq_ft FROM material_pricing ORDER BY material_name", conn)
+        except Exception as e:
+            conn.close()
+            return [], dbc.Alert(f"Error loading materials: {e}", color='danger')
+        conn.close()
+        return df.to_dict('records'), ''
+    if 'add-material-btn' in triggered:
+        data = rows or []
+        data.append({'material_name':'','price_per_sq_ft':0})
+        return data, 'Row added'
+    if 'save-materials-btn' in triggered and rows is not None:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cur = conn.cursor()
+        saved = 0
+        for r in rows:
+            name = (r.get('material_name') or '').strip()
+            if not name:
+                continue
+            try:
+                p = float(r.get('price_per_sq_ft') or 0)
+            except:
+                p = 0
+            cur.execute('''
+                INSERT INTO material_pricing (material_name, price_per_sq_ft)
+                VALUES (?,?)
+                ON CONFLICT(material_name) DO UPDATE SET price_per_sq_ft=excluded.price_per_sq_ft, last_updated=CURRENT_TIMESTAMP
+            ''', (name, p))
+            saved += 1
+        conn.commit(); conn.close()
+        return rows, f'Saved {saved} materials'
+    if 'recalc-sign-prices-btn' in triggered:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cur = conn.cursor()
+        cur.execute('''
+            UPDATE sign_types
+            SET unit_price = CASE 
+                WHEN width>0 AND height>0 THEN (
+                    width*height*COALESCE(
+                        (SELECT price_per_sq_ft FROM material_pricing mp WHERE LOWER(mp.material_name)=LOWER(sign_types.material)),
+                        price_per_sq_ft
+                    )
+                ) 
+                ELSE unit_price END,
+                price_per_sq_ft = COALESCE((SELECT price_per_sq_ft FROM material_pricing mp WHERE LOWER(mp.material_name)=LOWER(sign_types.material)), price_per_sq_ft),
+                last_modified = CURRENT_TIMESTAMP
+        ''')
+        conn.commit(); conn.close()
+        return rows, 'Recalculated sign prices'
+    raise PreventUpdate
+
+# ------------------ Sign Groups CRUD ------------------ #
+@app.callback(
+    Output('group-save-feedback','children'),
+    Output('group-select-dropdown','options', allow_duplicate=True),
+    Output('group-assign-group-dropdown','options', allow_duplicate=True),
+    Input('save-group-btn','n_clicks'),
+    State('group-name-input','value'),
+    State('group-desc-input','value'),
+    prevent_initial_call=True
+)
+def save_group(n_clicks, name, desc):
+    if not n_clicks:
+        raise PreventUpdate
+    name = (name or '').strip()
+    if not name:
+        return dbc.Alert('Name required', color='danger'), dash.no_update, dash.no_update
+    conn = sqlite3.connect(DATABASE_PATH)
+    cur = conn.cursor()
+    try:
+        cur.execute('''
+            INSERT INTO sign_groups (name, description) VALUES (?,?)
+            ON CONFLICT(name) DO UPDATE SET description=excluded.description
+        ''', (name, (desc or '')[:255]))
+        conn.commit()
+        groups_df = pd.read_sql_query('SELECT id, name FROM sign_groups ORDER BY name', conn)
+        conn.close()
+        options = [{'label': r.name, 'value': r.id} for r in groups_df.itertuples()]
+        return dbc.Alert(f"Group '{name}' saved", color='success'), options, options
+    except Exception as e:
+        conn.close()
+        return dbc.Alert(f'Error: {e}', color='danger'), dash.no_update, dash.no_update
+
+@app.callback(
+    Output('group-members-table','data'),
+    Output('group-members-feedback','children', allow_duplicate=True),
+    Input('group-select-dropdown','value'),
+    Input('group-add-sign-btn','n_clicks'),
+    Input('group-save-members-btn','n_clicks'),
+    State('group-add-sign-dropdown','value'),
+    State('group-add-sign-qty','value'),
+    State('group-members-table','data'),
+    prevent_initial_call=True
+)
+def manage_group_members(group_id, add_clicks, save_clicks, sign_type_id, qty, rows):
+    triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
+    if not group_id:
+        raise PreventUpdate
+    conn = sqlite3.connect(DATABASE_PATH)
+    cur = conn.cursor()
+    feedback = dash.no_update
+    if 'group-add-sign-btn' in triggered and sign_type_id:
+        cur.execute('SELECT id FROM sign_group_members WHERE group_id=? AND sign_type_id=?', (group_id, sign_type_id))
+        ex = cur.fetchone()
+        q = max(1, int(qty or 1))
+        if ex:
+            cur.execute('UPDATE sign_group_members SET quantity=? WHERE id=?', (q, ex[0]))
+        else:
+            cur.execute('INSERT INTO sign_group_members (group_id, sign_type_id, quantity) VALUES (?,?,?)', (group_id, sign_type_id, q))
+        conn.commit()
+        feedback = 'Member added/updated'
+    elif 'group-save-members-btn' in triggered and rows:
+        for r in rows:
+            name = r.get('sign_name')
+            q = max(0, int(r.get('quantity') or 0))
+            cur.execute('SELECT id FROM sign_types WHERE name=?', (name,))
+            st = cur.fetchone()
+            if not st:
+                continue
+            cur.execute('SELECT id FROM sign_group_members WHERE group_id=? AND sign_type_id=?', (group_id, st[0]))
+            ex = cur.fetchone()
+            if ex:
+                cur.execute('UPDATE sign_group_members SET quantity=? WHERE id=?', (q, ex[0]))
+        conn.commit()
+        feedback = 'Member quantities saved'
+    # Load
+    df = pd.read_sql_query('''SELECT st.name as sign_name, sgm.quantity FROM sign_group_members sgm JOIN sign_types st ON sgm.sign_type_id=st.id WHERE sgm.group_id=? ORDER BY st.name''', conn, params=(group_id,))
+    conn.close()
+    return df.to_dict('records'), feedback
+
+# ------------------ Assign Groups to Buildings ------------------ #
+@app.callback(
+    Output('group-assign-project-dropdown','options'),
+    Input('main-tabs','active_tab')
+)
+def populate_group_project_options(active_tab):
+    if active_tab != 'groups-tab':
+        raise PreventUpdate
+    conn = sqlite3.connect(DATABASE_PATH)
+    df = pd.read_sql_query('SELECT id, name FROM projects ORDER BY name', conn)
+    conn.close()
+    return [{'label': r.name, 'value': r.id} for r in df.itertuples()]
+
+@app.callback(
+    Output('group-assign-building-dropdown','options'),
+    Output('group-assign-building-dropdown','value'),
+    Input('group-assign-project-dropdown','value')
+)
+def populate_group_buildings(project_id):
+    if not project_id:
+        return [], None
+    conn = sqlite3.connect(DATABASE_PATH)
+    df = pd.read_sql_query('SELECT id, name FROM buildings WHERE project_id=? ORDER BY name', conn, params=(project_id,))
+    conn.close()
+    opts = [{'label': r.name,'value': r.id} for r in df.itertuples()]
+    return opts, (opts[0]['value'] if opts else None)
+
+@app.callback(
+    Output('building-groups-table','data'),
+    Output('group-assign-feedback','children'),
+    Input('group-assign-building-dropdown','value'),
+    Input('group-assign-btn','n_clicks'),
+    Input('building-save-group-qty-btn','n_clicks'),
+    State('group-assign-group-dropdown','value'),
+    State('group-assign-qty','value'),
+    State('building-groups-table','data'),
+    prevent_initial_call=True
+)
+def manage_building_groups(building_id, add_clicks, save_clicks, group_id, qty, rows):
+    triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
+    if not building_id:
+        raise PreventUpdate
+    conn = sqlite3.connect(DATABASE_PATH)
+    cur = conn.cursor()
+    feedback = dash.no_update
+    if 'group-assign-btn' in triggered and group_id:
+        cur.execute('SELECT id FROM building_sign_groups WHERE building_id=? AND group_id=?', (building_id, group_id))
+        ex = cur.fetchone()
+        q = max(1, int(qty or 1))
+        if ex:
+            cur.execute('UPDATE building_sign_groups SET quantity=? WHERE id=?', (q, ex[0]))
+        else:
+            cur.execute('INSERT INTO building_sign_groups (building_id, group_id, quantity) VALUES (?,?,?)', (building_id, group_id, q))
+        conn.commit()
+        feedback = 'Group assigned'
+    elif 'building-save-group-qty-btn' in triggered and rows:
+        for r in rows:
+            name = r.get('group_name')
+            q = max(0, int(r.get('quantity') or 0))
+            cur.execute('SELECT id FROM sign_groups WHERE name=?', (name,))
+            gr = cur.fetchone()
+            if not gr: continue
+            cur.execute('SELECT id FROM building_sign_groups WHERE building_id=? AND group_id=?', (building_id, gr[0]))
+            ex = cur.fetchone()
+            if ex:
+                cur.execute('UPDATE building_sign_groups SET quantity=? WHERE id=?', (q, ex[0]))
+        conn.commit(); feedback='Group quantities saved'
+    df = pd.read_sql_query('''SELECT sg.name as group_name, bsg.quantity FROM building_sign_groups bsg JOIN sign_groups sg ON bsg.group_id=sg.id WHERE bsg.building_id=? ORDER BY sg.name''', conn, params=(building_id,))
+    conn.close()
+    return df.to_dict('records'), feedback
 
 # ------------------ Health Endpoint ------------------ #
 @app.server.route('/health')

@@ -20,13 +20,10 @@ class DatabaseManager:
         """Initialize the SQLite database with required tables."""
         conn = sqlite3.connect(self.db_path)
         cursor = conn.cursor()
-        
-        # Enable foreign keys
         cursor.execute("PRAGMA foreign_keys = ON")
-        
-        # Projects table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS projects (
+
+        statements = [
+            '''CREATE TABLE IF NOT EXISTS projects (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 description TEXT,
@@ -35,25 +32,16 @@ class DatabaseManager:
                 installation_rate REAL DEFAULT 0.0,
                 include_installation BOOLEAN DEFAULT 1,
                 include_sales_tax BOOLEAN DEFAULT 1,
-                last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Buildings table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS buildings (
+                last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''',
+            '''CREATE TABLE IF NOT EXISTS buildings (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 project_id INTEGER,
                 name TEXT NOT NULL,
                 description TEXT,
                 last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
-                FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE
-            )
-        ''')
-        
-        # Sign types master table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sign_types (
+                FOREIGN KEY (project_id) REFERENCES projects (id) ON DELETE CASCADE)''',
+            '''CREATE UNIQUE INDEX IF NOT EXISTS idx_buildings_project_name ON buildings(project_id, name COLLATE NOCASE)''',
+            '''CREATE TABLE IF NOT EXISTS sign_types (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 description TEXT,
@@ -62,69 +50,43 @@ class DatabaseManager:
                 price_per_sq_ft REAL DEFAULT 0.0,
                 width REAL DEFAULT 0.0,
                 height REAL DEFAULT 0.0,
-                last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Sign groups table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sign_groups (
+                last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''',
+            '''CREATE TABLE IF NOT EXISTS sign_groups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 name TEXT NOT NULL UNIQUE,
                 description TEXT,
-                last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        # Sign group members (which signs are in which groups)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS sign_group_members (
+                last_modified TIMESTAMP DEFAULT CURRENT_TIMESTAMP)''',
+            '''CREATE TABLE IF NOT EXISTS sign_group_members (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 group_id INTEGER,
                 sign_type_id INTEGER,
                 quantity INTEGER DEFAULT 1,
                 FOREIGN KEY (group_id) REFERENCES sign_groups (id) ON DELETE CASCADE,
-                FOREIGN KEY (sign_type_id) REFERENCES sign_types (id) ON DELETE CASCADE
-            )
-        ''')
-        
-        # Building signs (individual signs assigned to buildings)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS building_signs (
+                FOREIGN KEY (sign_type_id) REFERENCES sign_types (id) ON DELETE CASCADE)''',
+            '''CREATE TABLE IF NOT EXISTS building_signs (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 building_id INTEGER,
                 sign_type_id INTEGER,
                 quantity INTEGER DEFAULT 1,
                 custom_price REAL,
                 FOREIGN KEY (building_id) REFERENCES buildings (id) ON DELETE CASCADE,
-                FOREIGN KEY (sign_type_id) REFERENCES sign_types (id) ON DELETE CASCADE
-            )
-        ''')
-        
-        # Building sign groups (sign groups assigned to buildings)
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS building_sign_groups (
+                FOREIGN KEY (sign_type_id) REFERENCES sign_types (id) ON DELETE CASCADE)''',
+            '''CREATE TABLE IF NOT EXISTS building_sign_groups (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 building_id INTEGER,
                 group_id INTEGER,
                 quantity INTEGER DEFAULT 1,
                 FOREIGN KEY (building_id) REFERENCES buildings (id) ON DELETE CASCADE,
-                FOREIGN KEY (group_id) REFERENCES sign_groups (id) ON DELETE CASCADE
-            )
-        ''')
-        
-        # Material pricing table
-        cursor.execute('''
-            CREATE TABLE IF NOT EXISTS material_pricing (
+                FOREIGN KEY (group_id) REFERENCES sign_groups (id) ON DELETE CASCADE)''',
+            '''CREATE TABLE IF NOT EXISTS material_pricing (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
                 material_name TEXT NOT NULL UNIQUE,
                 price_per_sq_ft REAL NOT NULL,
-                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP
-            )
-        ''')
-        
-        conn.commit()
-        conn.close()
+                last_updated TIMESTAMP DEFAULT CURRENT_TIMESTAMP)'''
+        ]
+        for stmt in statements:
+            cursor.execute(stmt)
+        conn.commit(); conn.close()
     
     def import_csv_data(self, csv_file_path, table_mapping=None):
         """
@@ -215,43 +177,32 @@ class DatabaseManager:
     def get_project_estimate(self, project_id):
         """Calculate comprehensive project estimate."""
         conn = sqlite3.connect(self.db_path)
-        
-        # Get project info
-        project = pd.read_sql_query(
-            "SELECT * FROM projects WHERE id = ?", 
-            conn, params=(project_id,)
-        ).iloc[0] if pd.read_sql_query("SELECT * FROM projects WHERE id = ?", conn, params=(project_id,)).shape[0] > 0 else None
-        
-        if not project:
+        _proj_df = pd.read_sql_query("SELECT * FROM projects WHERE id = ?", conn, params=(project_id,))
+        if _proj_df.empty:
             conn.close()
             return None
-        
+        project = _proj_df.iloc[0]
+
         estimate_data = []
         total_cost = 0.0
-        
-        # Get buildings for this project
+
         buildings = pd.read_sql_query(
             "SELECT * FROM buildings WHERE project_id = ?",
             conn, params=(project_id,)
         )
-        
         for _, building in buildings.iterrows():
             building_cost = 0.0
-            
-            # Individual signs
             signs = pd.read_sql_query('''
-                SELECT st.name, st.unit_price, st.material, st.width, st.height, 
+                SELECT st.name, st.unit_price, st.material, st.width, st.height,
                        bs.quantity, bs.custom_price
                 FROM building_signs bs
                 JOIN sign_types st ON bs.sign_type_id = st.id
                 WHERE bs.building_id = ?
             ''', conn, params=(building['id'],))
-            
             for _, sign in signs.iterrows():
                 price = sign['custom_price'] if sign['custom_price'] else sign['unit_price']
                 line_total = price * sign['quantity']
                 building_cost += line_total
-                
                 estimate_data.append({
                     'Building': building['name'],
                     'Item': sign['name'],
@@ -261,17 +212,13 @@ class DatabaseManager:
                     'Unit_Price': price,
                     'Total': line_total
                 })
-            
-            # Sign groups
             groups = pd.read_sql_query('''
                 SELECT sg.name as group_name, bsg.quantity as group_quantity
                 FROM building_sign_groups bsg
                 JOIN sign_groups sg ON bsg.group_id = sg.id
                 WHERE bsg.building_id = ?
             ''', conn, params=(building['id'],))
-            
             for _, group in groups.iterrows():
-                # Get signs in this group
                 group_signs = pd.read_sql_query('''
                     SELECT st.name, st.unit_price, sgm.quantity
                     FROM sign_group_members sgm
@@ -279,11 +226,9 @@ class DatabaseManager:
                     JOIN sign_groups sg ON sgm.group_id = sg.id
                     WHERE sg.name = ?
                 ''', conn, params=(group['group_name'],))
-                
                 group_total = sum(row['unit_price'] * row['quantity'] for _, row in group_signs.iterrows())
                 line_total = group_total * group['group_quantity']
                 building_cost += line_total
-                
                 estimate_data.append({
                     'Building': building['name'],
                     'Item': f"Group: {group['group_name']}",
@@ -293,10 +238,8 @@ class DatabaseManager:
                     'Unit_Price': group_total,
                     'Total': line_total
                 })
-            
             total_cost += building_cost
-        
-        # Add installation and tax if applicable
+
         if project['include_installation'] and project['installation_rate']:
             installation_cost = total_cost * project['installation_rate']
             total_cost += installation_cost
@@ -309,7 +252,6 @@ class DatabaseManager:
                 'Unit_Price': installation_cost,
                 'Total': installation_cost
             })
-        
         if project['include_sales_tax'] and project['sales_tax_rate']:
             tax_cost = total_cost * project['sales_tax_rate']
             total_cost += tax_cost
@@ -322,9 +264,41 @@ class DatabaseManager:
                 'Unit_Price': tax_cost,
                 'Total': tax_cost
             })
-        
         conn.close()
         return estimate_data
+
+    def recalc_prices_from_materials(self):
+        """Recalculate sign type pricing from material_pricing table.
+
+        Rules:
+        - For each sign_types row with width & height > 0 and material present & matching material_pricing.material_name:
+            * Set price_per_sq_ft = material_pricing.price_per_sq_ft
+            * Set unit_price = width * height * price_per_sq_ft (overwrite existing)
+        Returns count of rows updated.
+        """
+        conn = sqlite3.connect(self.db_path)
+        cur = conn.cursor()
+        cur.execute('''
+            SELECT st.id, st.width, st.height, mp.price_per_sq_ft
+            FROM sign_types st
+            JOIN material_pricing mp ON LOWER(st.material)=LOWER(mp.material_name)
+            WHERE st.width > 0 AND st.height > 0
+        ''')
+        rows = cur.fetchall()
+        updated = 0
+        for sid, w, h, ppsf in rows:
+            try:
+                area = float(w) * float(h)
+                unit_price = area * float(ppsf)
+            except Exception:
+                continue
+            cur.execute('''UPDATE sign_types
+                           SET price_per_sq_ft=?, unit_price=?, last_modified=CURRENT_TIMESTAMP
+                           WHERE id=?''', (float(ppsf), float(unit_price), sid))
+            updated += 1
+        conn.commit()
+        conn.close()
+        return updated
     
     def optimize_for_onedrive(self):
         """Optimize database for OneDrive sharing."""
