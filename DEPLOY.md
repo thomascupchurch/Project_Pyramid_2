@@ -31,7 +31,7 @@ What this does:
 
 Subsequent deployments only copy changed files using SHA256 hashes. Use `--force` to override.
 
-### Useful Flags
+### Useful Flags (Core + Advanced)
 
 | Flag | Purpose |
 |------|---------|
@@ -42,6 +42,18 @@ Subsequent deployments only copy changed files using SHA256 hashes. Use `--force
 | `--bundle` | Build GUI PyInstaller bundle and copy to OneDrive |
 | `--bundle-console` | Also build console variant |
 | `--pyinstaller-extra ...` | Extra args passed through to PyInstaller |
+| `--backup-db` | Create a timestamped database backup in `backups/` (inside deployment) |
+| `--backup-retention N` | Keep only newest N backups (used with `--backup-db`) |
+| `--collect-logs` | Copy `*.log` files into `logs/` with a summary entry |
+| `--prune` | Remove orphaned files in target not present locally anymore |
+| `--archive` | Zip the previous deployment state before overwriting (stored in `archives/`) |
+
+Helper wrappers (recommended):
+| Script | Behavior |
+|--------|----------|
+| `scripts/deploy_full.bat` | Runs full safe deploy (`--backup-db --backup-retention 7 --collect-logs --prune --archive`) |
+| `scripts/deploy_full.ps1` | PowerShell equivalent of above |
+| `scripts/deploy_fast.bat` | Minimal fast incremental deploy (only changed files; add flags manually) |
 
 Examples:
 ```powershell
@@ -53,6 +65,15 @@ action scripts/deploy.py --force --bundle --bundle-console
 
 # Disable hash comparison (mtime only)
 python scripts/deploy.py --no-hash
+ 
+# Full robust deploy with all protective features
+python scripts/deploy.py --backup-db --backup-retention 7 --collect-logs --prune --archive
+
+# Fast minimal deploy (wrapper)
+scripts\deploy_fast.bat
+
+# Full recommended deploy (wrapper)
+scripts\deploy_full.bat
 ```
 
 ---
@@ -102,8 +123,8 @@ If Python isn't installed, build a bundle so coworkers can launch without depend
 - To protect a production DB from accidental overwrite, deploy with `--exclude-db` once it's in place.
 - To sync database only: `python scripts/sync_db.py` (run from your dev repo, not from inside the OneDrive folder).
 
-### Conflict Scenarios
-If two people run source mode and write simultaneously, SQLite WAL usually manages this. For heavy concurrent writes consider migrating to a server database later.
+### Conflict Scenarios & Concurrency
+SQLite WAL allows concurrent readers and a single writer. Brief write contention is retried automatically. Last-write-wins on the same row. For heavy simultaneous editing of identical projects coordinate manually. Use `--backup-db` (or the full deploy wrapper) for point-in-time recovery. Consider a server database if write contention becomes routine.
 
 ---
 ## 5. File Change Detection
@@ -140,11 +161,16 @@ For bundle builds you can still set these variables; they are read by the embedd
 | Port already in use | Set `SIGN_APP_PORT` to another unused port |
 
 ---
-## 8. Future Enhancements (Ideas)
-- Automatic backup rotation of database on each deployment
-- Incremental diff report showing removed files
-- Optional compression of previous deployments
-- Remote log aggregation
+## 8. Features Added (Previously "Future")
+- Backup rotation (`--backup-db` + `--backup-retention`)
+- Optional pruning of removed files (`--prune`)
+- Archival of prior deployment (`--archive`)
+- Log aggregation (`--collect-logs`)
+
+Future ideas:
+- Deployment diff report (human-readable)
+- Integrity verification pass (hash audit command)
+- Optional encryption of backups
 
 ---
 ## 9. Quick Reference Commands
@@ -167,4 +193,4 @@ python scripts/deploy.py --setup-only
 ```
 
 ---
-**Last Updated:** Auto-generated improvements added (hash-based detection, bundle deploy, enhanced startup scripts).
+**Last Updated:** Added backup/retention, log aggregation, pruning, archiving, helper deploy scripts, and concurrency guidance.

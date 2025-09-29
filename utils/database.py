@@ -104,7 +104,8 @@ class DatabaseManager:
             ('material_multiplier','ALTER TABLE sign_types ADD COLUMN material_multiplier REAL DEFAULT 0.0'),
             ('install_type','ALTER TABLE sign_types ADD COLUMN install_type TEXT'),
             ('install_time_hours','ALTER TABLE sign_types ADD COLUMN install_time_hours REAL DEFAULT 0.0'),
-            ('per_sign_install_rate','ALTER TABLE sign_types ADD COLUMN per_sign_install_rate REAL DEFAULT 0.0')
+            ('per_sign_install_rate','ALTER TABLE sign_types ADD COLUMN per_sign_install_rate REAL DEFAULT 0.0'),
+            ('image_path','ALTER TABLE sign_types ADD COLUMN image_path TEXT')
         ]
         for col, sql in migrations:
             if col not in existing_cols:
@@ -112,6 +113,33 @@ class DatabaseManager:
                     cursor.execute(sql)
                 except Exception:
                     pass
+        # Create multi-image table if not exists
+        try:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS sign_type_images (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                sign_type_id INTEGER NOT NULL,
+                image_path TEXT NOT NULL,
+                display_order INTEGER DEFAULT 0,
+                file_hash TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (sign_type_id) REFERENCES sign_types(id) ON DELETE CASCADE
+            )''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_sign_type_images_sign_type ON sign_type_images(sign_type_id, display_order)')
+        except Exception:
+            pass
+
+        # Backfill: if sign_types.image_path present but no corresponding row in sign_type_images, insert it
+        try:
+            cursor.execute('''SELECT id, image_path FROM sign_types WHERE image_path IS NOT NULL AND TRIM(image_path) <> '' ''')
+            rows = cursor.fetchall()
+            for sid, ipath in rows:
+                # Does a row already exist?
+                cursor.execute('SELECT 1 FROM sign_type_images WHERE sign_type_id=? AND image_path=?', (sid, ipath))
+                if cursor.fetchone():
+                    continue
+                cursor.execute('INSERT INTO sign_type_images (sign_type_id, image_path, display_order) VALUES (?,?,0)', (sid, ipath))
+        except Exception:
+            pass
         conn.commit(); conn.close()
     
     def import_csv_data(self, csv_file_path, table_mapping=None):
@@ -199,6 +227,26 @@ class DatabaseManager:
             
         except Exception as e:
             return False, f"Error exporting to Excel: {str(e)}"
+
+    def set_sign_image(self, sign_name: str, image_rel_path: str):
+        """Associate an image (relative path) with a sign type.
+
+        Args:
+            sign_name: Name of the sign type (case-insensitive match)
+            image_rel_path: Path relative to application root or dedicated images dir
+        Returns: (success: bool, message: str)
+        """
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute("UPDATE sign_types SET image_path = ?, last_modified=CURRENT_TIMESTAMP WHERE lower(name)=lower(?)", (image_rel_path, sign_name))
+            if cur.rowcount == 0:
+                conn.close()
+                return False, f"Sign type '{sign_name}' not found"
+            conn.commit(); conn.close()
+            return True, 'Image path updated'
+        except Exception as e:
+            return False, f'Error setting image: {e}'
     
     def get_project_estimate(self, project_id):
         """Calculate comprehensive project estimate."""

@@ -16,6 +16,8 @@ A modern Python web application for sign manufacturing cost estimation and proje
   - Custom pricing overrides
 - **Tree Visualization**: Visual project hierarchy showing projects → buildings → signs
 - **Export Capabilities**: Generate estimates with company branding
+- **Sign Type Images**: Attach an image (PNG/JPG/GIF/SVG) to each sign type; thumbnails surface in hover panels for static & interactive trees
+   - Embedded in PDF (thumbnail column) and Excel (thumbnail column) exports when images are present
 
 ### Pricing Methods
 
@@ -77,6 +79,45 @@ A modern Python web application for sign manufacturing cost estimation and proje
 - Keep the database file `sign_estimation.db` in the shared folder; SQLite WAL mode (enabled in code) reduces file locking issues.
 - Avoid opening the database simultaneously with external tools while app is running.
 - Backups: run `python scripts/backup_db.py` periodically (or copy the file) – creates timestamped copies under `backups/`.
+- Full deployment wrapper `scripts/deploy_full.bat` (or `deploy_full.ps1`) creates a rotating backup automatically and prunes older ones.
+
+### Multi-User Concurrency & Locking
+
+This application intentionally uses SQLite in WAL (Write-Ahead Logging) mode to support a small estimating team without needing a separate database server.
+
+Key behaviors:
+- Multiple readers never block each other or the writer.
+- Only one writer transaction commits at a time; brief contention is auto‑handled by SQLite (the app layer retries briefly if needed).
+- Last write wins on the same exact row; there is no field‑level merge.
+- Normal viewing, filtering, exporting = read-only and never blocked.
+- Expensive writes: CSV import, material price recalculation – run when others are idle.
+
+Recommended workflow:
+1. Assign a temporary "editor" for a project when performing large quantity or pricing changes.
+2. Communicate before bulk recalculation or mass import.
+3. Use the deploy full script to create daily backups; for ad‑hoc safety copy the DB file (include any `-wal` / `-shm` if present during live copy).
+4. If corruption is suspected (rare), restore the newest backup or a previous OneDrive version.
+
+Scaling note: If your team grows beyond ~10 concurrent users or write frequency becomes heavy, plan a future migration to Postgres or MySQL using the same schema concepts.
+
+### Sign Type Images
+
+Each sign type can store one associated image under `sign_images/` (auto-created). Use the "Sign Type Images" card on the Sign Types tab:
+
+1. Select a sign type
+2. Upload PNG/JPG/JPEG/GIF/SVG (SVG preserved; converted when needed)
+3. Image immediately available in both tree hover panels
+
+Re-upload replaces the existing image. Filenames are sanitized (`<signname>.<ext>`). Stored path recorded in `sign_types.image_path`.
+
+Displayed in:
+- Interactive Cytoscape tree hover card
+- Static Plotly tree hover card
+- PDF export (thumbnail column if any images exist)
+- Excel export (thumbnail column inserted at A if images exist)
+- PNG export (future enhancement to embed per-sign thumbnails if desired)
+
+Planned (optional) future expansions: multiple images per sign, export embedding, automatic downscaling of large files.
 
 ### Performance & Stability
 
@@ -133,6 +174,51 @@ LAN deployment here is plain HTTP inside your internal network. Do not expose di
 
 2. **On Team Machines**: Navigate to the OneDrive folder and run `start_app.bat` or `start_app.ps1`
 
+### One-Step Build + Deploy (Developer)
+
+Use the new helper script to build a fresh PyInstaller GUI bundle and perform a full deploy (backups, prune, archive, logs):
+
+```
+scripts\deploy_and_bundle.bat
+```
+
+It will:
+1. Rebuild the GUI bundle from `sign_estimator.spec` (cleaning `dist/` and `build/` first)
+2. Run `deploy.py` with `--bundle --backup-db --backup-retention 7 --collect-logs --prune --archive`
+3. Produce / update `start_app.bat` & `start_app.ps1` in the OneDrive root
+
+Optional extra PyInstaller args can be appended, e.g.:
+
+```
+scripts\deploy_and_bundle.bat --pyinstaller-extra --clean
+```
+
+### Coworker Quick Start (No Python Installed)
+
+1. Open the shared OneDrive folder (e.g. `SignEstimationApp`)
+2. Double‑click `start_app.bat`
+   - If a bundled executable exists under `bundle/`, it launches immediately
+   - Otherwise it silently creates a per‑user venv in `%LOCALAPPDATA%\SignEstimator\venv` and installs dependencies (only on first run or when requirements change)
+3. After a short moment your browser opens at `http://localhost:8050`
+
+If SmartScreen warns about the executable: choose “More info” → “Run anyway” (internal trusted tool).
+
+### Verifying a Deployment
+
+Run the lightweight validator locally or from inside the OneDrive deployment root:
+
+```
+python scripts/verify_deploy.py --path "C:\Users\You\OneDrive\SignEstimationApp" 
+```
+
+Outputs status of bundle, startup scripts, database presence, and deployment timestamp freshness. Use `--json` for machine-readable output.
+
+### Version Marker (Optional)
+
+Add a `VERSION.txt` file in the project root before running the deploy script; it will be carried to OneDrive and surfaced by `verify_deploy.py`.
+
+---
+
 ### Enhanced Deployment Options
 
 The project now supports:
@@ -142,6 +228,19 @@ The project now supports:
 - Smarter startup scripts that auto-create a per-user virtual environment or prefer a bundled executable if present
 
 See `DEPLOY.md` for full details and advanced usage.
+### Optional / Recommended Packages
+
+Install these for full-feature export fidelity:
+
+| Package   | Feature Enabled                                   |
+|-----------|----------------------------------------------------|
+| reportlab | PDF estimate export                                |
+| kaleido   | High quality static Plotly image (tree) export     |
+| cairosvg  | SVG logo & SVG sign image rasterization for exports|
+| Pillow    | Image composition & PNG post-processing            |
+| openpyxl  | Excel export (already required)                    |
+
+If missing, a dismissible yellow banner lists them; core app still functions with graceful fallbacks.
 ## 📊 Usage Guide
 
 ### Environment Variables
@@ -309,7 +408,7 @@ This application is proprietary software developed for internal use by the sign 
 ---
 
 **Last Updated**: September 2025  
-**Version**: 1.0.0  
+**Version**: 1.1.0  
 **Compatibility**: Windows 10/11, Python 3.8+, Microsoft 365
 
 ---

@@ -9,6 +9,9 @@ __pycache__/
 .build/
 build/
 dist/
+.venv/
+activate/
+wheelhouse/
 
 # Byte-compiled / optimized / DLL files
 *$py.class

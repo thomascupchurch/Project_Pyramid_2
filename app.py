@@ -21,6 +21,21 @@ import json
 from pathlib import Path
 from dash.exceptions import PreventUpdate
 
+# Lightweight image type detector (avoid imghdr dependency warnings)
+def _detect_image_type(raw: bytes, filename: str) -> str | None:
+    head = raw[:16]
+    lower_name = filename.lower()
+    if head.startswith(b"\x89PNG\r\n\x1a\n"):
+        return 'png'
+    if head.startswith(b"\xff\xd8"):
+        return 'jpg'
+    if head.startswith(b"GIF87a") or head.startswith(b"GIF89a"):
+        return 'gif'
+    # SVG (either by extension or xml/svg tag early)
+    if lower_name.endswith('.svg') or b'<svg' in raw[:200].lower():
+        return 'svg'
+    return None
+
 # Add utils to path
 sys.path.append(str(Path(__file__).parent / "utils"))
 
@@ -598,6 +613,9 @@ app.layout = dbc.Container([
     # Main content area
     dcc.Store(id='app-state', data={}),
     dcc.Store(id='last-error-message'),
+    dcc.Store(id='env-banner-dismissed', data=False),
+    # Lightweight periodic meta refresh (db/code timestamps)
+    dcc.Interval(id='status-refresh-interval', interval=5*60*1000, n_intervals=0),  # every 5 minutes
     # Global toast for surfaced errors
     html.Div([
         dbc.Toast(id='app-error-toast', header='Notice', is_open=False, dismissable=True, duration=4000, icon='danger', style={'position':'fixed','top':10,'right':10,'zIndex':1080})
@@ -606,7 +624,8 @@ app.layout = dbc.Container([
     html.Footer(
         className='app-footer text-center text-muted py-3 small mt-auto',
         children=[
-            html.Span("© 2025 LSI Graphics, LLC")
+            html.Span("© 2025 LSI Graphics, LLC"),
+            html.Span(id='runtime-status', className='ms-3')
         ]
     )
     
@@ -661,6 +680,39 @@ def render_projects_tab():
                         dbc.Col([
                             dbc.Button("Export Tree PNG", id='export-tree-png-btn', color='secondary', className='mt-1 w-100')
                         ], md=4)
+                    ]),
+                    # Interactive layout controls (shown only in Cytoscape mode)
+                    html.Div(id='cyto-layout-controls', style={'display':'none'}, children=[
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Label('Spacing Factor'),
+                                dcc.Slider(id='cyto-spacing-factor', min=0.5, max=3.0, step=0.25, value=1.25,
+                                           tooltip={'placement':'bottom','always_visible':False})
+                            ], md=6),
+                            dbc.Col([
+                                dbc.Label('Padding'),
+                                dcc.Slider(id='cyto-padding', min=0, max=100, step=5, value=15,
+                                           tooltip={'placement':'bottom','always_visible':False})
+                            ], md=6)
+                        ], className='g-3 mb-2'),
+                        dbc.Row([
+                            dbc.Col([
+                                dbc.Label('Label Max Width'),
+                                dcc.Slider(id='cyto-label-width', min=60, max=220, step=10, value=120,
+                                           tooltip={'placement':'bottom','always_visible':False})
+                            ], md=6),
+                            dbc.Col([
+                                dbc.Label('Node Size'),
+                                dcc.Slider(id='cyto-node-size', min=8, max=40, step=1, value=15,
+                                           tooltip={'placement':'bottom','always_visible':False})
+                            ], md=6)
+                        ], className='g-3 mb-2'),
+                        dbc.Row([
+                            dbc.Col(dbc.Checklist(id='cyto-toggle-labels', options=[{'label':'Show Labels','value':'labels'}], value=['labels'], switch=True), md='auto'),
+                            dbc.Col(dbc.Checklist(id='cyto-toggle-images', options=[{'label':'Show Images','value':'images'}], value=['images'], switch=True), md='auto'),
+                            dbc.Col(dbc.Checklist(id='cyto-toggle-highlight', options=[{'label':'Highlight on Hover','value':'hl'}], value=['hl'], switch=True), md='auto')
+                        ], className='g-3 mb-2 flex-wrap'),
+                        html.Small('Adjust node spacing & layout padding for the interactive tree. Higher spacing factor spreads nodes further apart.', className='text-muted')
                     ]),
                     # Tree figure populated asynchronously by init callback; avoids layout-time exceptions blocking tab
                     html.Div(id='project-tree-wrapper', children=[
@@ -828,7 +880,7 @@ def render_signs_tab():
     try:
         conn = sqlite3.connect(DATABASE_PATH)
         preload_df = pd.read_sql_query(
-            "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate FROM sign_types ORDER BY name",
+            "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name",
             conn
         )
         # Also preload material pricing so user immediately sees saved materials
@@ -866,6 +918,20 @@ def render_signs_tab():
                                 style={'width':'140px'}
                             )
                         ], width='auto'),
+                        dbc.Col([
+                            dbc.Label("Install Type"),
+                            dcc.Dropdown(
+                                id='signs-install-filter',
+                                options=[
+                                    {'label':'All','value':'all'},
+                                    {'label':'Exterior (ext)','value':'ext'},
+                                    {'label':'Non-Exterior','value':'non_ext'}
+                                ],
+                                value='all',
+                                clearable=False,
+                                style={'width':'170px'}
+                            )
+                        ], width='auto'),
                         dbc.Col(className='flex-grow-1')
                     ], className='g-3 mb-2 align-items-end'),
                     dash_table.DataTable(
@@ -892,8 +958,32 @@ def render_signs_tab():
                     ),
                     dbc.Button("Add New Sign Type", id="add-sign-btn", color="success", className="mt-3 me-2"),
                     dbc.Badge(id="signs-save-status", color="secondary", className="ms-2")
-                ])
+                ]),
+                # Store original unfiltered sign types dataset to allow restoring after filters
+                dcc.Store(id='signs-table-master-store', data=preload_records)
             ]),
+            dbc.Card([
+                dbc.CardHeader(html.H5("Sign Type Images")),
+                dbc.CardBody([
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label('Select Sign Type'),
+                            dcc.Dropdown(id='sign-image-sign-dropdown', options=[{'label':r['name'],'value':r['name']} for r in preload_records], placeholder='Choose sign type...')
+                        ], width=6),
+                        dbc.Col([
+                            dbc.Label('Upload Image'),
+                            dcc.Upload(
+                                id='sign-image-upload',
+                                children=html.Div(['Drag & Drop or ', html.A('Select File')]),
+                                multiple=False,
+                                style={'border':'1px dashed #888','padding':'12px','textAlign':'center','cursor':'pointer'}
+                            )
+                        ], width=6)
+                    ]),
+                    html.Div(id='sign-image-upload-feedback', className='mt-2'),
+                    html.Small('Supported: PNG/JPG/GIF/SVG. Stored under sign_images/. Re-upload to replace.', className='text-muted')
+                ])
+            ], className='mt-3'),
             dbc.Card([
                 dbc.CardHeader(html.H5("Material Pricing")),
                 dbc.CardBody([
@@ -1312,7 +1402,7 @@ def manual_import_book2(n):
         imported, total = _force_import_book2(csv_path)
         conn = sqlite3.connect(DATABASE_PATH)
         df = pd.read_sql_query(
-            "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate FROM sign_types ORDER BY name",
+            "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name",
             conn
         )
         conn.close()
@@ -1770,6 +1860,100 @@ def surface_errors(*feedback_children):
             return True, text
     raise PreventUpdate
 
+# ------------------ Runtime status (DB & Code refresh timestamps) ------------------ #
+def _humanize_delta(delta_seconds: float) -> str:
+    try:
+        if delta_seconds < 0:
+            delta_seconds = 0
+        mins = delta_seconds / 60.0
+        if mins < 1:
+            return f"{int(delta_seconds)}s ago"
+        if mins < 60:
+            return f"{int(mins)}m ago"
+        hours = mins / 60.0
+        if hours < 24:
+            return f"{int(hours)}h ago"
+        days = hours / 24.0
+        if days < 7:
+            return f"{int(days)}d ago"
+        weeks = days / 7.0
+        if weeks < 4:
+            return f"{int(weeks)}w ago"
+        months = days / 30.0
+        if months < 12:
+            return f"{int(months)}mo ago"
+        years = days / 365.0
+        return f"{years:.1f}y ago"
+    except Exception:
+        return "n/a"
+
+def _get_db_timestamp() -> tuple[str, str]:
+    try:
+        if DATABASE_PATH and os.path.exists(DATABASE_PATH):
+            ts = os.path.getmtime(DATABASE_PATH)
+            dt = datetime.utcfromtimestamp(ts)
+            rel = _humanize_delta((datetime.utcnow() - dt).total_seconds())
+            return rel, dt.isoformat() + 'Z'
+    except Exception:
+        pass
+    return 'unknown', ''
+
+def _get_code_timestamp() -> tuple[str, str]:
+    # Preferred: deployment_info.json (deployed_at)
+    try:
+        deployment_file = Path('deployment_info.json')
+        if deployment_file.exists():
+            import json as _json
+            try:
+                info = _json.loads(deployment_file.read_text())
+                deployed_at = info.get('deployed_at') or info.get('timestamp')
+                if deployed_at:
+                    # Normalize Z
+                    ts_txt = deployed_at.replace('Z','')
+                    try:
+                        dt = datetime.fromisoformat(ts_txt)
+                    except Exception:
+                        dt = datetime.utcnow()
+                    # Assume provided timestamp is UTC
+                    rel = _humanize_delta((datetime.utcnow() - dt).total_seconds())
+                    return rel, (dt.isoformat() + 'Z')
+            except Exception:
+                pass
+        # Fallback: max mtime of a small set of source files/dirs
+        candidates = []
+        for relp in ['app.py', 'utils', 'scripts']:
+            p = Path(relp)
+            if p.is_file():
+                candidates.append(p.stat().st_mtime)
+            elif p.is_dir():
+                # Shallow scan only for performance
+                for child in p.iterdir():
+                    if child.suffix in ('.py', '.json') and child.is_file():
+                        candidates.append(child.stat().st_mtime)
+        if candidates:
+            ts = max(candidates)
+            dt = datetime.utcfromtimestamp(ts)
+            rel = _humanize_delta((datetime.utcnow() - dt).total_seconds())
+            return rel, dt.isoformat() + 'Z'
+    except Exception:
+        pass
+    return 'unknown', ''
+
+@app.callback(
+    Output('runtime-status','children'),
+    Input('status-refresh-interval','n_intervals')
+)
+def update_runtime_status(_n):
+    try:
+        db_rel, db_iso = _get_db_timestamp()
+        code_rel, code_iso = _get_code_timestamp()
+        parts = []
+        parts.append(f"DB: {db_rel}" + (f" ({db_iso})" if db_iso else ''))
+        parts.append(f"Code: {code_rel}" + (f" ({code_iso})" if code_iso else ''))
+        return html.Small(' • '.join(parts), className='text-muted')
+    except Exception as e:
+        return html.Small(f"Status unavailable: {e}", className='text-muted')
+
 # ------------------ Estimate Generation & Export ------------------ #
 @app.callback(
     Output('estimate-table', 'data'),
@@ -2011,6 +2195,18 @@ def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode,
             df.to_excel(writer, index=False, sheet_name='Estimate')
             wb = writer.book
             ws = wb['Estimate']
+            # Preload image paths map (sign name -> path)
+            image_map = {}
+            try:
+                conn = sqlite3.connect(DATABASE_PATH)
+                idf = pd.read_sql_query('SELECT name, image_path FROM sign_types WHERE image_path IS NOT NULL AND image_path<>""', conn)
+                conn.close()
+                for _, ir in idf.iterrows():
+                    ip = ir['image_path']
+                    if ip and Path(ip).exists():
+                        image_map[ir['name'].lower()] = Path(ip)
+            except Exception as e:
+                print(f"[excel][thumb-preload][warn] {e}")
             # Insert branding header above table
             ws.insert_rows(1, amount=4)
             ws.merge_cells('A1:D3')
@@ -2034,6 +2230,61 @@ def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode,
                     ws.add_image(img)
                 except Exception:
                     pass
+            # Optional thumbnail column (insert after A header if images present)
+            try:
+                if image_map:
+                    # Add new column for thumbnails at column A shifting existing
+                    ws.insert_cols(1, amount=1)
+                    ws['A5'] = 'Image'
+                    from PIL import Image as PILImage
+                    import tempfile as _tmp
+                    def make_thumb(p: Path):
+                        try:
+                            if p.suffix.lower()=='.svg' and cairosvg:
+                                with NamedTemporaryFile(suffix='.png', delete=False) as tp:
+                                    cairosvg.svg2png(url=str(p), write_to=tp.name, output_width=120)
+                                    return tp.name
+                            im = PILImage.open(p).convert('RGBA')
+                            im.thumbnail((120,60))
+                            tf = _tmp.NamedTemporaryFile(suffix='.png', delete=False)
+                            im.save(tf.name, format='PNG')
+                            return tf.name
+                        except Exception:
+                            return None
+                    max_row = ws.max_row
+                    # Data starts at row 5 now (header offset + inserted rows) ; find column indexes for Item and Building to compute matching sign name
+                    # Find 'Item' header (shifted one col to right due to insert).
+                    header_row = 5
+                    item_col = None
+                    building_col = None
+                    for cell in ws[header_row]:
+                        if cell.value == 'Item':
+                            item_col = cell.column
+                        if cell.value == 'Building':
+                            building_col = cell.column
+                    if item_col:
+                        for r_idx in range(header_row+1, max_row+1):
+                            cell_item = ws.cell(row=r_idx, column=item_col).value
+                            if not cell_item:
+                                continue
+                            base_item = str(cell_item)
+                            if base_item.startswith('Group:'):
+                                base_item = base_item.replace('Group:','').strip()
+                            key = base_item.lower()
+                            pth = image_map.get(key)
+                            if not pth:
+                                continue
+                            tp = make_thumb(pth)
+                            if tp:
+                                try:
+                                    thumb_img = XLImage(tp)
+                                    thumb_img.anchor = f"A{r_idx}"
+                                    ws.add_image(thumb_img)
+                                except Exception:
+                                    pass
+                    ws.column_dimensions['A'].width = 14
+            except Exception as ee:
+                print(f"[excel][thumb][warn] {ee}")
             # Footer branding line after table
             footer_row = ws.max_row + 2
             ws.merge_cells(start_row=footer_row, start_column=1, end_row=footer_row, end_column=6)
@@ -2166,46 +2417,117 @@ def export_estimate_pdf(n_clicks, table_data, summary_children, pdf_title):
         story.append(meta_tbl)
         story.append(Spacer(1, 18))
 
-        # Detailed line items table
-        headers = ['Building','Item','Material','Dimensions','Qty','Unit $','Line Total']
+        # Detailed line items table with optional thumbnail column
+        # Preload sign images into map
+        image_map = {}
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            idf = pd.read_sql_query('SELECT name, image_path FROM sign_types WHERE image_path IS NOT NULL AND image_path<>""', conn)
+            conn.close()
+            for _, ir in idf.iterrows():
+                ip = ir['image_path']
+                if ip and Path(ip).exists():
+                    image_map[ir['name'].lower()] = Path(ip)
+        except Exception as e:
+            print(f"[pdf][thumb-preload][warn] {e}")
+        def make_thumb(path: Path):
+            try:
+                if path.suffix.lower()=='.svg':
+                    try:
+                        import cairosvg, tempfile as _tmp
+                        tmpf = _tmp.NamedTemporaryFile(suffix='.png', delete=False)
+                        cairosvg.svg2png(url=str(path), write_to=tmpf.name, output_width=120)
+                        return tmpf.name
+                    except Exception:
+                        return None
+                from PIL import Image as PILImage
+                import tempfile as _tmp
+                im = PILImage.open(path).convert('RGBA')
+                im.thumbnail((110,55))
+                tmpf = _tmp.NamedTemporaryFile(suffix='.png', delete=False)
+                im.save(tmpf.name, format='PNG')
+                return tmpf.name
+            except Exception:
+                return None
+        headers = ['Img','Building','Item','Material','Dimensions','Qty','Unit $','Line Total']
         rows = [headers]
         for r in table_data:
-            u = r.get('Unit_Price','')
-            t = r.get('Total','')
-            try:
-                u_fmt = f"$ {float(u):,.2f}" if str(u).strip() != '' else ''
-            except Exception:
-                u_fmt = str(u)
-            try:
-                t_fmt = f"$ {float(t):,.2f}" if str(t).strip() != '' else ''
-            except Exception:
-                t_fmt = str(t)
+            item = r.get('Item','')
+            base_item = item.split('Group:')[-1].strip() if item.startswith('Group:') else item
+            img_flow = ''
+            cand = base_item.lower()
+            thumb = image_map.get(cand)
+            if thumb:
+                tp = make_thumb(thumb)
+                if tp and Path(tp).exists():
+                    try:
+                        from reportlab.platypus import Image as RLImage
+                        img_flow = RLImage(tp, width=50, height=28, kind='proportional')
+                    except Exception:
+                        img_flow = ''
+            def fmt_money(v):
+                try:
+                    return f"$ {float(v):,.2f}" if str(v).strip()!='' else ''
+                except Exception:
+                    return str(v)
             rows.append([
-                r.get('Building',''), r.get('Item',''), r.get('Material',''), r.get('Dimensions',''),
-                r.get('Quantity',''), u_fmt, t_fmt
+                img_flow,
+                r.get('Building',''),
+                item,
+                r.get('Material',''),
+                r.get('Dimensions',''),
+                r.get('Quantity',''),
+                fmt_money(r.get('Unit_Price','')),
+                fmt_money(r.get('Total',''))
             ])
-        detail_tbl = Table(rows, repeatRows=1, colWidths=[70,110,70,70,35,60,70])
+        detail_tbl = Table(rows, repeatRows=1, colWidths=[36,70,108,65,70,32,60,70])
         detail_tbl.setStyle(TableStyle([
             ('BACKGROUND',(0,0),(-1,0), colors.HexColor('#1f4e79')),
             ('TEXTCOLOR',(0,0),(-1,0), colors.whitesmoke),
             ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-            ('FONTSIZE',(0,0),(-1,0),9),
+            ('FONTSIZE',(0,0),(-1,0),8),
             ('ALIGN',(0,0),(-1,0),'LEFT'),
             ('GRID',(0,0),(-1,-1),0.25, colors.HexColor('#b0b0b0')),
-            ('FONTSIZE',(0,1),(-1,-1),7),
+            ('FONTSIZE',(0,1),(-1,-1),6.5),
             ('VALIGN',(0,0),(-1,-1),'TOP'),
             ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.Color(0.97,0.97,0.97)]),
             ('ALIGN',(-2,1),(-1,-1),'RIGHT'),
-            ('RIGHTPADDING',(-2,0),(-1,-1),4),
-            ('LEFTPADDING',(0,0),(-1,-1),4)
+            ('RIGHTPADDING',(-2,0),(-1,-1),3),
+            ('LEFTPADDING',(0,0),(-1,-1),3),
+            ('TOPPADDING',(0,0),(-1,-1),2),
+            ('BOTTOMPADDING',(0,0),(-1,-1),2)
         ]))
         story.append(detail_tbl)
         story.append(Spacer(1, 20))
         story.append(Paragraph('<font size=8 color="#666666">Prepared using the internal Sign Estimation Tool. Figures are for estimation purposes only.</font>', styles['Normal']))
 
+        # Build the PDF and flush the buffer
         doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
+        try:
+            buf.flush()
+        except Exception:
+            pass
         buf.seek(0)
-        b64 = base64.b64encode(buf.read()).decode()
+        pdf_bytes = buf.read()
+        # Simple sanity check: PDF should start with %PDF and end with %%EOF (tolerate trailing whitespace)
+        valid = True
+        if not pdf_bytes.startswith(b'%PDF'):
+            valid = False
+        if b'%%EOF' not in pdf_bytes[-20:]:  # allow for small metadata trailer
+            # search last 1KB for EOF marker
+            tail = pdf_bytes[-1024:]
+            if b'%%EOF' not in tail:
+                valid = False
+        if not valid:
+            # Attempt fallback: write to temp for debugging and raise PreventUpdate
+            try:
+                with open('debug_failed_estimate.pdf','wb') as dbg:
+                    dbg.write(pdf_bytes)
+                print('[export-pdf][warn] PDF validation failed; wrote debug_failed_estimate.pdf')
+            except Exception:
+                pass
+            raise PreventUpdate
+        b64 = base64.b64encode(pdf_bytes).decode()
         return dict(content=b64, filename='estimate.pdf', type='application/pdf')
     except Exception as e:
         print(f"[export-pdf][error] {e}")
@@ -2254,16 +2576,23 @@ def export_tree_png(n_clicks, fig_dict):
             import cairosvg, tempfile
             if logo_path.exists():
                 with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-                    cairosvg.svg2png(url=str(logo_path), write_to=tmp.name, output_width=260)
+                    cairosvg.svg2png(url=str(logo_path), write_to=tmp.name, output_width=360)
                     logo_png = PILImage.open(tmp.name).convert('RGBA')
-                    lh = 80
+                    lh = 95
                     ratio = lh / logo_png.height
                     lw = int(logo_png.width * ratio)
                     logo_png = logo_png.resize((lw, lh))
-                    out_img.paste(logo_png, (20, int((header_h - lh)/2)), logo_png)
+                    # Center horizontally
+                    out_img.paste(logo_png, ((width - lw)//2, int((header_h - lh)/2)), logo_png)
         except Exception:
-            pass
-        title_text = 'Project Tree Visualization'
+            # Fallback simple text if svg -> png conversion unavailable
+            try:
+                from PIL import ImageFont
+                fnt = ImageFont.load_default()
+                draw.text((width//2 - 40, 30), 'LSI', fill=(40,40,40,255), font=fnt)
+            except Exception:
+                pass
+        title_text = 'Project Tree'
         try:
             font = ImageFont.truetype('Arial.ttf', 26)
         except Exception:
@@ -2273,7 +2602,7 @@ def export_tree_png(n_clicks, fig_dict):
             tw = bbox[2]-bbox[0]; th = bbox[3]-bbox[1]
         except Exception:
             tw, th = draw.textlength(title_text, font=font), 26
-        draw.text((width - tw - 20, (header_h - th)//2), title_text, fill=(20,20,20,255), font=font)
+        draw.text(((width - tw)//2, (header_h - th)//2), title_text, fill=(20,20,20,255), font=font)
         out_img.paste(base_img, (0, header_h))
         footer_y = header_h + base_img.height
         draw.line([(0, footer_y),(width, footer_y)], fill=(180,180,180,255), width=1)
@@ -2301,15 +2630,24 @@ def export_tree_png(n_clicks, fig_dict):
 @app.callback(
     Output('project-tree-wrapper','children'),
     Input('tree-view-mode','value'),
+    State('cyto-spacing-factor','value'),
+    State('cyto-padding','value'),
     prevent_initial_call=True
 )
-def switch_tree_view(mode):
+def switch_tree_view(mode, spacing_factor, padding):
+    # Guard against pandas Series / unexpected iterable causing ambiguous truth errors
+    try:
+        if isinstance(mode, pd.Series):
+            # Take first value if series provided
+            mode = mode.iloc[0] if not mode.empty else 'static'
+    except Exception:
+        pass
     if mode == 'cyto':
         nodes = get_project_tree_data()
         # Preload sign types metadata
         conn = sqlite3.connect(DATABASE_PATH)
         try:
-            st_df = pd.read_sql_query('SELECT name, unit_price, width, height, price_per_sq_ft, material_multiplier, material, description FROM sign_types', conn)
+            st_df = pd.read_sql_query('SELECT name, unit_price, width, height, price_per_sq_ft, material_multiplier, material, description, image_path FROM sign_types', conn)
         except Exception:
             st_df = pd.DataFrame(columns=['name','unit_price','width','height','price_per_sq_ft','material_multiplier','material','description'])
         finally:
@@ -2325,7 +2663,8 @@ def switch_tree_view(mode):
                 if base_name.startswith('Group:'):
                     base_name = base_name.replace('Group:','').strip()
                 info = st_map.get(base_name)
-                if info:
+                # Explicit None check; avoid ambiguous Series truth evaluation
+                if info is not None:
                     width = info.get('width') or 0
                     height = info.get('height') or 0
                     area = (width or 0) * (height or 0)
@@ -2338,7 +2677,8 @@ def switch_tree_view(mode):
                         'area': area,
                         'unit_price': info.get('unit_price') or 0,
                         'price_per_sq_ft': info.get('price_per_sq_ft') or 0,
-                        'material_multiplier': info.get('material_multiplier') or 0
+                        'material_multiplier': info.get('material_multiplier') or 0,
+                        'image_path': info.get('image_path') or ''
                     })
             elements.append({'data': data, 'classes': n['type']})
         for n in nodes:
@@ -2352,14 +2692,30 @@ def switch_tree_view(mode):
             {'selector': '.sign','style': {'background-color':'#2ca02c'}},
             {'selector': 'edge','style': {'width':2,'line-color':'#ccc','curve-style':'bezier'}}
         ]
-        return cyto.Cytoscape(
+        # Fallback defaults if None
+        try:
+            sf = float(spacing_factor) if spacing_factor else 1.25
+        except Exception:
+            sf = 1.25
+        try:
+            pad = int(padding) if padding is not None else 15
+        except Exception:
+            pad = 15
+        cyto_component = cyto.Cytoscape(
             id='project-tree-cyto',
             elements=elements,
-            layout={'name':'breadthfirst','directed':True,'spacingFactor':1.25,'padding':15},
+            layout={'name':'breadthfirst','directed':True,'spacingFactor':sf,'padding':pad},
             style={'width':'100%','height':'600px'},
             stylesheet=stylesheet,
-            generateImage=False
+            generateImage=False,
+            zoom=1,
+            minZoom=0.2,
+            maxZoom=4
         )
+        return [
+            cyto_component,
+            html.Div(id='cyto-hover-panel', style={'position':'absolute','top':'60px','right':'25px','zIndex':1050,'display':'none','maxWidth':'340px'})
+        ]
     return dcc.Graph(id='project-tree', figure=safe_tree_figure())
 
 # Initial tree population when app loads / Projects tab first shown
@@ -2372,9 +2728,82 @@ def init_tree(active_tab):
         return safe_tree_figure()
     raise PreventUpdate
 
+# Show/hide cytoscape layout controls based on selected mode
+@app.callback(
+    Output('cyto-layout-controls','style'),
+    Input('tree-view-mode','value')
+)
+def toggle_layout_controls(mode):
+    if mode == 'cyto':
+        return {'display':'block'}
+    return {'display':'none'}
+
+# Update Cytoscape layout dynamically when spacing sliders move
+@app.callback(
+    Output('project-tree-cyto','layout'),
+    Output('project-tree-cyto','stylesheet', allow_duplicate=True),
+    Input('cyto-spacing-factor','value'),
+    Input('cyto-padding','value'),
+    Input('cyto-label-width','value'),
+    Input('cyto-node-size','value'),
+    Input('cyto-toggle-labels','value'),
+    Input('cyto-toggle-images','value'),
+    State('project-tree-cyto','stylesheet'),
+    State('tree-view-mode','value'),
+    prevent_initial_call=True
+)
+def update_cyto_layout(spacing_factor, padding, label_width, node_size, toggle_labels, toggle_images, current_stylesheet, mode):
+    if mode != 'cyto':
+        raise PreventUpdate
+    try:
+        sf = float(spacing_factor) if spacing_factor else 1.25
+    except Exception:
+        sf = 1.25
+    try:
+        pad = int(padding) if padding is not None else 15
+    except Exception:
+        pad = 15
+    try:
+        lw = int(label_width) if label_width else 120
+    except Exception:
+        lw = 120
+    try:
+        ns = int(node_size) if node_size else 15
+    except Exception:
+        ns = 15
+    show_labels = bool(toggle_labels and 'labels' in toggle_labels)
+    show_images = bool(toggle_images and 'images' in toggle_images)
+    base_styles = [
+        {'selector':'node','style':{
+            'content': 'data(label)' if show_labels else '',
+            'text-wrap':'wrap','text-max-width': lw,
+            'text-valign':'center','color':'#fff','font-size':'9px',
+            'background-color':'#4a90e2','padding':'4px',
+            'width': ns, 'height': ns,
+            'background-fit': 'cover'
+        }},
+        {'selector':'.project','style':{'background-color':'#1f77b4','font-size':'11px','font-weight':'bold','width':ns+6,'height':ns+6}},
+        {'selector':'.building','style':{'background-color':'#ff7f0e'}},
+        {'selector':'.sign','style':{'background-color':'#2ca02c'}},
+        {'selector':'edge','style':{'width':2,'line-color':'#bbb','curve-style':'bezier'}},
+        {'selector':'node.hover','style':{'border-width':3,'border-color':'#222','shadow-blur':8,'shadow-color':'#999','shadow-opacity':0.7,'shadow-offset-x':2,'shadow-offset-y':2}}
+    ]
+    if show_images:
+        # use image_path as background if present
+        base_styles.append({'selector':'node[image_path]','style':{'background-image':'data(image_path)','background-color':'#1f1f1f'}})
+    return {'name':'breadthfirst','directed':True,'spacingFactor':sf,'padding':pad}, base_styles
+
+## (Removed earlier duplicate hover callback to avoid duplicate output errors)
+
 # Diagnostics banner generation
-@app.callback(Output('diagnostics-banner','children'), Input('main-tabs','active_tab'))
-def diagnostics_banner(_active):
+@app.callback(
+    Output('diagnostics-banner','children'),
+    Input('main-tabs','active_tab'),
+    Input('env-banner-dismissed','data')
+)
+def diagnostics_banner(_active, dismissed):
+    if dismissed:
+        return ''
     mods = [
         ('reportlab','PDF'),
         ('kaleido','PNG Export'),
@@ -2390,11 +2819,20 @@ def diagnostics_banner(_active):
     if not missing:
         return ''
     return dbc.Alert([
-        html.Strong('Environment Notice: '),
-        f"Missing optional packages: {', '.join(missing)}.",
-        html.Span(' Some export features may have reduced functionality.', className='ms-1'),
-        html.Small(' (Run scripts/verify_env.py for full check)', className='ms-2 text-muted')
-    ], color='warning', className='py-2 my-2')
+        html.Div([
+            html.Strong('Environment Notice: '),
+            html.Span(f"Missing optional packages: {', '.join(missing)}. "),
+            html.Span('Some export features may have reduced functionality. ', className='ms-1'),
+            html.Small('Run scripts/verify_env.py for full check.', className='text-muted'),
+            dbc.Button('×', id='close-env-banner', color='link', size='sm', className='p-0 ms-2', n_clicks=0, style={'textDecoration':'none','fontSize':'1.2rem','lineHeight':'1rem','float':'right'})
+        ])
+    ], color='warning', className='py-2 my-2 position-relative')
+
+@app.callback(Output('env-banner-dismissed','data'), Input('close-env-banner','n_clicks'), prevent_initial_call=True)
+def dismiss_env_banner(n):
+    if not n:
+        raise PreventUpdate
+    return True
 
 # Project deletion callback
 @app.callback(
@@ -2495,27 +2933,30 @@ def update_install_inputs(mode):
 
 # ------------------ Sign Types Table CRUD ------------------ #
 @app.callback(
-    Output('signs-table', 'data'),
+    Output('signs-table', 'data', allow_duplicate=True),
     Output('signs-save-status', 'children'),
+    Output('signs-table-master-store','data', allow_duplicate=True),
     Input('main-tabs', 'active_tab'),
     Input('signs-table', 'data_timestamp'),
     Input('add-sign-btn', 'n_clicks'),
-    State('signs-table', 'data')
+    State('signs-table', 'data'),
+    prevent_initial_call='initial_duplicate'
 )
 def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
     triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
     if 'main-tabs' in triggered and active_tab == 'signs-tab':
         conn = sqlite3.connect(DATABASE_PATH)
         df = pd.read_sql_query(
-            "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate FROM sign_types ORDER BY name",
+            "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name",
             conn
         )
         conn.close()
-        return df.to_dict('records'), ''
+    records = df.to_dict('records')
+    return records, '', records
     if 'add-sign-btn' in triggered:
         rows = data_rows or []
         rows.append({"name":"","description":"","unit_price":0,"material":"","price_per_sq_ft":0,"width":0,"height":0})
-        return rows, 'New row added'
+    return rows, 'New row added', rows
     if 'signs-table' in triggered and active_tab == 'signs-tab':
         rows = data_rows or []
         conn = sqlite3.connect(DATABASE_PATH)
@@ -2531,12 +2972,12 @@ def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
                 except: return 0.0
             # New extended columns (may not yet be in table for older deployments; ignore errors silently)
             extended_sql = '''
-                INSERT INTO sign_types (name, description, material_alt, unit_price, material, price_per_sq_ft, width, height, material_multiplier, install_type, install_time_hours, per_sign_install_rate)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?)
+                INSERT INTO sign_types (name, description, material_alt, unit_price, material, price_per_sq_ft, width, height, material_multiplier, install_type, install_time_hours, per_sign_install_rate, image_path)
+                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
                 ON CONFLICT(name) DO UPDATE SET description=excluded.description, material_alt=excluded.material_alt, unit_price=excluded.unit_price,
                     material=excluded.material, price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height,
                     material_multiplier=excluded.material_multiplier, install_type=excluded.install_type, install_time_hours=excluded.install_time_hours,
-                    per_sign_install_rate=excluded.per_sign_install_rate
+                    per_sign_install_rate=excluded.per_sign_install_rate, image_path=COALESCE(excluded.image_path, image_path)
             '''
             material_alt = (row.get('material_alt') or row.get('Material2') or '')[:120]
             material_multiplier = n(row.get('material_multiplier'))
@@ -2556,7 +2997,8 @@ def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
                     material_multiplier,
                     install_type_val,
                     install_time_hours,
-                    per_sign_install_rate
+                    per_sign_install_rate,
+                    (row.get('image_path') or None)
                 ))
             except Exception:
                 # Fallback to legacy column set if migration not applied
@@ -2577,7 +3019,7 @@ def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
             saved += 1
             cleaned.append(row)
         conn.commit(); conn.close()
-        return cleaned, f'Saved {saved} rows'
+        return cleaned, f'Saved {saved} rows', cleaned
     raise PreventUpdate
 
 # Dynamic page size control for sign types table
@@ -2594,6 +3036,105 @@ def update_signs_page_size(size, rows):
         # All rows
         return len(rows) if rows else 10000
     return size
+
+# Filter sign types by install type (ext vs non-ext)
+@app.callback(
+    Output('signs-table','data', allow_duplicate=True),
+    Input('signs-install-filter','value'),
+    Input('signs-table-master-store','data'),
+    prevent_initial_call='initial_duplicate'
+)
+def filter_signs_by_install(filter_value, master_rows):
+    if filter_value is None or filter_value == 'all':
+        return master_rows
+    try:
+        if filter_value == 'ext':
+            return [r for r in master_rows if (r.get('install_type') or '').strip().lower() == 'ext']
+        elif filter_value == 'non_ext':
+            return [r for r in master_rows if (r.get('install_type') or '').strip().lower() != 'ext']
+        return master_rows
+    except Exception as e:
+        print(f"[filter_signs_by_install][error] {e}")
+        return master_rows
+
+# ------------------ Sign Type Image Upload ------------------ #
+@app.callback(
+    Output('sign-image-upload-feedback','children'),
+    Output('signs-table-master-store','data', allow_duplicate=True),
+    Output('signs-table','data', allow_duplicate=True),
+    Output('sign-image-sign-dropdown','options', allow_duplicate=True),
+    Input('sign-image-upload','contents'),
+    State('sign-image-upload','filename'),
+    State('sign-image-sign-dropdown','value'),
+    State('signs-table-master-store','data'),
+    prevent_initial_call=True
+)
+def handle_sign_image_upload(contents, filename, sign_name, master_rows):
+    if not contents or not filename or not sign_name:
+        raise PreventUpdate
+    try:
+        header, b64data = contents.split(',',1)
+        raw = base64.b64decode(b64data)
+        # Determine image type
+        img_type = _detect_image_type(raw, filename)
+        if img_type not in ('png','jpg','jpeg','gif','svg'):
+            return dbc.Alert('Unsupported image format. Allowed: PNG/JPG/GIF/SVG', color='danger'), master_rows, master_rows, [{'label':r['name'],'value':r['name']} for r in (master_rows or [])]
+        ext = 'jpg' if img_type == 'jpeg' else img_type
+        images_dir = Path('sign_images')
+        images_dir.mkdir(exist_ok=True)
+        safe_base = ''.join(c for c in sign_name if c.isalnum() or c in ('-','_')).strip('_') or 'sign'
+        # Overwrite single canonical file per sign (simpler than uuid versions for now)
+        out_path = images_dir / f"{safe_base}.{ext}"
+        with open(out_path, 'wb') as f:
+            f.write(raw)
+        # Update DB (case-insensitive match on name)
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            cur = conn.cursor()
+            cur.execute("UPDATE sign_types SET image_path=?, last_modified=CURRENT_TIMESTAMP WHERE LOWER(name)=LOWER(?)", (str(out_path), sign_name))
+            conn.commit(); conn.close()
+        except Exception as dbe:
+            print(f"[sign-image][db][error] {dbe}")
+            return dbc.Alert(f"Image saved but DB update failed: {dbe}", color='warning'), master_rows, master_rows, [{'label':r['name'],'value':r['name']} for r in (master_rows or [])]
+        # Reload full sign types to update table + store
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            df = pd.read_sql_query("SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name", conn)
+            conn.close()
+            new_rows = df.to_dict('records')
+        except Exception as re:
+            print(f"[sign-image][reload][error] {re}")
+            new_rows = master_rows
+        options = [{'label':r['name'],'value':r['name']} for r in (new_rows or [])]
+        return dbc.Alert(f"Image attached to '{sign_name}'", color='success'), new_rows, new_rows, options
+    except Exception as e:
+        print(f"[sign-image][error] {e}")
+        return dbc.Alert(f"Upload failed: {e}", color='danger'), master_rows, master_rows, [{'label':r['name'],'value':r['name']} for r in (master_rows or [])]
+
+# Serve uploaded sign images (simple static route)
+try:
+    from flask import send_file, abort
+    @app.server.route('/sign-images/<path:filename>')
+    def serve_sign_image(filename):
+        base_dir = Path('sign_images')
+        target = (base_dir / filename).resolve()
+        # Prevent path traversal: ensure parent
+        if not str(target).startswith(str(base_dir.resolve())):
+            return abort(404)
+        if not target.exists():
+            return abort(404)
+        # Infer mimetype
+        ext = target.suffix.lower().lstrip('.')
+        mime = {
+            'png':'image/png',
+            'jpg':'image/jpeg',
+            'jpeg':'image/jpeg',
+            'gif':'image/gif',
+            'svg':'image/svg+xml'
+        }.get(ext, 'application/octet-stream')
+        return send_file(str(target), mimetype=mime)
+except Exception as e:
+    print(f"[sign-image][route][warn] Could not register image route: {e}")
 
 # Tiny debug stats updater (tab focused or after save/import) 
 @app.callback(
@@ -2656,9 +3197,24 @@ def cyto_hover(_wrapper_children, mouseover):
         except Exception:
             return str(num)
     header = data.get('sign_name') or data.get('label')
+    # Build image (if any)
+    img_el = None
+    img_rel = data.get('image_path')
+    if img_rel:
+        # Normalize path for route (strip leading ./ or backslashes)
+        p = str(img_rel).replace('\\','/')
+        if p.startswith('./'):
+            p = p[2:]
+        if p.startswith('sign_images/'):
+            fname = p.split('/',1)[1]
+        else:
+            # assume stored as sign_images/filename or raw filename
+            fname = Path(p).name
+        img_el = html.Img(src=f"/sign-images/{fname}", style={'maxWidth':'100%','maxHeight':'140px','objectFit':'contain','marginBottom':'8px','border':'1px solid #ddd','padding':'2px','background':'#fff'})
     body = dbc.Card([
         dbc.CardHeader(html.Strong(header)),
         dbc.CardBody([
+            img_el,
             html.Div(data.get('description') or '', className='mb-2 small'),
             html.Table([
                 html.Tbody([
@@ -2669,6 +3225,66 @@ def cyto_hover(_wrapper_children, mouseover):
                     html.Tr([html.Th('Unit Price'), html.Td(f"$ {fmt(data.get('unit_price'))}")]),
                     html.Tr([html.Th('$ / SqFt'), html.Td(fmt(data.get('price_per_sq_ft')))]),
                     html.Tr([html.Th('Multiplier'), html.Td(fmt(data.get('material_multiplier')))])
+                ])
+            ], className='table table-sm mb-0')
+        ])
+    ], className='shadow-sm')
+    style = {'position':'absolute','top':'60px','right':'25px','zIndex':1050,'display':'block','maxWidth':'340px'}
+    return body, style
+
+# ------------------ Static Plotly Tree Hover Panel ------------------ #
+@app.callback(
+    Output('cyto-hover-panel','children', allow_duplicate=True),
+    Output('cyto-hover-panel','style', allow_duplicate=True),
+    Input('project-tree','hoverData'),
+    prevent_initial_call=True
+)
+def static_tree_hover(hoverData):
+    if not hoverData or 'points' not in hoverData:
+        raise PreventUpdate
+    pt = (hoverData['points'] or [{}])[0]
+    label = pt.get('text') or pt.get('customdata') or ''
+    # Derive base sign name (strip qty)
+    base = str(label).split('(')[0].strip()
+    if not base:
+        raise PreventUpdate
+    # Fetch sign details including image
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        sdf = pd.read_sql_query('SELECT name, description, material, width, height, unit_price, price_per_sq_ft, material_multiplier, image_path FROM sign_types WHERE LOWER(name)=LOWER(?)', conn, params=(base,))
+        conn.close()
+    except Exception as e:
+        print(f"[static-hover][error] {e}")
+        raise PreventUpdate
+    if sdf.empty:
+        raise PreventUpdate
+    r = sdf.iloc[0]
+    def fmt(num):
+        try:
+            return f"{float(num):,.2f}"
+        except Exception:
+            return str(num)
+    area = (r.get('width') or 0) * (r.get('height') or 0)
+    img_el=None
+    img_rel = r.get('image_path')
+    if img_rel:
+        p = str(img_rel).replace('\\','/')
+        fname = Path(p).name
+        img_el = html.Img(src=f"/sign-images/{fname}", style={'maxWidth':'100%','maxHeight':'140px','objectFit':'contain','marginBottom':'8px','border':'1px solid #ddd','padding':'2px','background':'#fff'})
+    body = dbc.Card([
+        dbc.CardHeader(html.Strong(base)),
+        dbc.CardBody([
+            img_el,
+            html.Div((r.get('description') or '')[:160], className='mb-2 small'),
+            html.Table([
+                html.Tbody([
+                    html.Tr([html.Th('Material', className='pe-2'), html.Td(r.get('material') or '-')]),
+                    html.Tr([html.Th('Width'), html.Td(fmt(r.get('width')))]),
+                    html.Tr([html.Th('Height'), html.Td(fmt(r.get('height')))]),
+                    html.Tr([html.Th('Area'), html.Td(fmt(area))]),
+                    html.Tr([html.Th('Unit Price'), html.Td(f"$ {fmt(r.get('unit_price'))}")]),
+                    html.Tr([html.Th('$ / SqFt'), html.Td(fmt(r.get('price_per_sq_ft')))]),
+                    html.Tr([html.Th('Multiplier'), html.Td(fmt(r.get('material_multiplier')))])
                 ])
             ], className='table table-sm mb-0')
         ])
