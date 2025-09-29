@@ -9,3 +9,6 @@ requests==2.32.5
 pytest==8.3.3
 dash-cytoscape==1.0.0
 cairosvg==2.7.1
+reportlab==4.2.5
+kaleido==0.2.1
+platformdirs==4.3.6

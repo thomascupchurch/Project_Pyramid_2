@@ -1,0 +1,33 @@
+/* Responsive logo and sticky footer styles */
+.app-logo {
+  max-height: 120px;
+  height: 12vw; /* scales down on smaller widths */
+  min-height: 70px;
+  width: auto;
+}
+@media (max-width: 992px) {
+  .app-logo { height: 16vw; max-height:110px; }
+}
+@media (max-width: 576px) {
+  .app-logo { height: 20vw; max-height:100px; }
+}
+
+/* Ensure the main container stretches full viewport height (Bootstrap utility already added) */
+.d-flex.flex-column.min-vh-100 { background-color: #ffffff; }
+
+/* Footer styling */
+.app-footer {
+  border-top: 1px solid #e2e2e2;
+  background: #fafafa;
+  font-weight: 500;
+  letter-spacing: .3px;
+}
+
+/* Light tweak to tab-content spacing so footer not crowded */
+#tab-content { padding-bottom: 1rem; }
+
+/* Optional: shrink DataTable font slightly on very small screens */
+@media (max-width: 600px) {
+  .dash-table-container .dash-spreadsheet td, 
+  .dash-table-container .dash-spreadsheet th { font-size: 0.72rem; }
+}

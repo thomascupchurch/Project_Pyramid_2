@@ -54,7 +54,7 @@ A modern Python web application for sign manufacturing cost estimation and proje
 ## Windows / OneDrive Deployment (Team Use)
 
 1. Place the whole project folder inside the shared OneDrive directory your coworkers can access.
-2. Ask coworkers to double‑click `start_windows.bat` (it will create a local `.venv` beside the code and install dependencies). The first run may take a couple minutes; subsequent runs are fast.
+2. Preferred: coworkers double‑click `scripts/launch_app.bat` (runs `scripts/setup_env.bat` behind the scenes). It creates a per‑user venv in `%LOCALAPPDATA%\SignEstimator` (keeps OneDrive clean) and installs/updates dependencies only when `requirements.txt` changes.
 3. The app will start on `http://localhost:8050` by default. To allow another machine on the LAN to reach it change env vars:
    - `SIGN_APP_HOST=0.0.0.0`
    - Optionally set `SIGN_APP_PORT=8060` (or another free port)
@@ -86,12 +86,15 @@ A modern Python web application for sign manufacturing cost estimation and proje
 
 ### Customization via Environment Variables
 
-| Variable       | Purpose                            | Default            |
-| -------------- | ---------------------------------- | ------------------ |
-| SIGN_APP_DB    | Path to DB file                    | sign_estimation.db |
-| SIGN_APP_PORT  | HTTP port                          | 8050               |
-| SIGN_APP_HOST  | Bind address (0.0.0.0 for LAN)     | 127.0.0.1          |
-| SIGN_APP_DEBUG | Dash debug mode (1/true to enable) | 0                  |
+| Variable              | Purpose                                 | Default            |
+| --------------------- | --------------------------------------- | ------------------ |
+| SIGN_APP_DB           | Path to DB file                         | sign_estimation.db |
+| SIGN_APP_PORT         | HTTP port                               | 8050               |
+| SIGN_APP_HOST         | Bind address (0.0.0.0 for LAN)          | 127.0.0.1          |
+| SIGN_APP_DEBUG        | Dash debug mode (1/true to enable)      | 0                  |
+| ONEDRIVE_SYNC_DIR     | Path to OneDrive sync folder (autosync) | (unset)            |
+| ONEDRIVE_AUTOSYNC_SEC | Autosync interval seconds               | 300                |
+| SIGN_APP_CACHE_DIR    | Alternate cache/temp path               | per-user cache     |
 
 ### Security Note
 
@@ -377,4 +380,90 @@ Price Recalculation without UI:
 python scripts/recalc_prices.py --db sign_estimation.db
 ```
 
+## 🔍 Diagnostics Banner
+
+At the top of the UI a yellow banner may appear listing missing optional packages (`reportlab`, `kaleido`, `cairosvg`, `PIL`). These enhance export quality. Use:
+
+```bash
+python scripts/verify_env.py
+```
+
+to see a full status. The application still runs with graceful fallbacks.
+
+## 📦 PyInstaller Bundle (Optional Distribution)
+
+To create a single-folder bundled version (still serves via Python embedded runtime):
+
+1. Install PyInstaller (not pinned in requirements by default):
+   ```bash
+   pip install pyinstaller
+   ```
+2. Build (basic example):
+   ```bash
+   pyinstaller --name sign_estimator --add-data "assets:assets" --add-data "LSI_Logo.svg:." --hidden-import plotly.io._kaleido app.py
+   ```
+3. After build finishes, distribute the `dist/sign_estimator/` folder. Place `sign_estimation.db` (or a copy) beside the executable if you want a portable, non-shared run; otherwise point to the shared DB via `SIGN_APP_DB` env var.
+4. Run:
+   ```bash
+   dist/sign_estimator/sign_estimator.exe
+   ```
+
+Recommended extra flags (windowed build):
+
+```bash
+pyinstaller app.py \
+  --name sign_estimator \
+  --noconfirm \
+  --clean \
+  --add-data "assets{}assets" \
+  --add-data "LSI_Logo.svg{}." \
+  --hidden-import plotly.io._kaleido \
+  --hidden-import cairo \
+  --hidden-import cairosvg \
+  --hidden-import reportlab.pdfgen
+```
+
+Replace `{}` with `;` on Windows, `:` on macOS/Linux.
+
+### Console Build Variant
+
+Use the console spec for debugging (shows stdout/stderr in a terminal window):
+
+```bash
+pyinstaller sign_estimator_console.spec --noconfirm
+```
+
+Or via helper scripts:
+
+Windows:
+
+```bat
+scripts\build_bundle.bat --console
+```
+
+macOS/Linux:
+
+```bash
+bash scripts/build_bundle.sh --console
+```
+
+Notes:
+
+- Keep the database outside the bundled directory if multiple users share it.
+- Rebuild the bundle after updating `requirements.txt`.
+- Large assets (fonts) can be added similarly with `--add-data`.
+
+## 🧊 Wheelhouse Optimization (Optional)
+
+Create a local wheel cache to speed first-time setup for multiple users:
+
+```bash
+pip download -r requirements.txt -d wheelhouse
+```
+
+Bootstrap scripts automatically use it if present.
+
+```
+
 This updates unit_price for all sign_types whose material matches material_pricing and width/height > 0.
+```
