@@ -2125,10 +2125,9 @@ def update_runtime_status(_n):
     State('embed-images-store','data'),
     State('exterior-only-toggle','value'),
     State('non-exterior-only-toggle','value'),
-    State('exterior-only-toggle','value'),
     prevent_initial_call=True
 )
-def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mode, inst_percent, inst_per_sign, inst_per_area, inst_hours, inst_hourly, auto_install_toggle, exterior_toggle, non_exterior_toggle, exterior_toggle_dup):
+def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mode, inst_percent, inst_per_sign, inst_per_area, inst_hours, inst_hourly, auto_install_toggle, embed_store, exterior_toggle, non_exterior_toggle):
     if not n_clicks:
         raise PreventUpdate
     if db_manager is None:
@@ -2574,12 +2573,19 @@ def export_tree_png(n_clicks, fig_dict):
             except Exception:
                 f = ImageFont.load_default()
             d.text((20, 40), 'Tree figure unavailable (invalid data).', fill='red', font=f)
+            print(f"[png][diag] invalid fig_dict keys={list(fig_dict.keys()) if isinstance(fig_dict, dict) else type(fig_dict)}")
             b = io.BytesIO(); err_img.save(b, format='PNG'); b.seek(0)
             return dict(content=base64.b64encode(b.read()).decode(), filename='project_tree_error.png', type='image/png')
         fig = go.Figure(fig_dict)
         try:
             base_png = fig.to_image(format='png', scale=2)
         except Exception as err:
+            try:
+                import kaleido  # noqa: F401
+                kaleido_present = True
+            except Exception:
+                kaleido_present = False
+            print(f"[png][diag][error] to_image failed err={err} kaleido_present={kaleido_present}")
             # Likely kaleido missing; create fallback image
             fallback = PILImage.new('RGB',(1200,400),'white')
             d = ImageDraw.Draw(fallback)

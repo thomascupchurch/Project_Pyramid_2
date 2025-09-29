@@ -143,6 +143,11 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
     if not logo_diag.get('rendered'):
         story.append(Paragraph('<para align="left"><font size=16 color="#1f4e79"><b>LSI Graphics</b></font></para>', styles['Normal']))
         story.append(Spacer(1, 10))
+    else:
+        try:
+            print(f"[pdf][logo] rendered path={chosen} candidates={logo_diag.get('candidates')}")
+        except Exception:
+            pass
 
     story.append(Paragraph(f'<para align="left"><font size=20><b>{title_text}</b></font></para>', styles['Normal']))
     story.append(Spacer(1, 12))
