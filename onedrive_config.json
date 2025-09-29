@@ -1,0 +1,32 @@
+{
+  "onedrive_path": "C:\\Users\\tupchurch\\OneDrive - LSI\\SignEstimationApp",
+  "deployment_settings": {
+    "exclude_patterns": [
+      "activate",
+      "venv",
+      "bundle",
+      ".git",
+      ".env",
+      "dist",
+      "development.db",
+      ".venv",
+      "node_modules",
+      "build",
+      "*.pyc",
+      "__pycache__",
+      ".vscode"
+    ],
+    "include_patterns": [
+      "*.py",
+      "*.html",
+      "*.css",
+      "*.js",
+      "*.svg",
+      "*.db",
+      "*.json",
+      "*.txt",
+      "*.md"
+    ]
+  },
+  "last_sync": "2025-09-29T09:29:19.704419"
+}

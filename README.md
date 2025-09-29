@@ -133,6 +133,15 @@ LAN deployment here is plain HTTP inside your internal network. Do not expose di
 
 2. **On Team Machines**: Navigate to the OneDrive folder and run `start_app.bat` or `start_app.ps1`
 
+### Enhanced Deployment Options
+
+The project now supports:
+- Hash-based change detection (faster incremental deploys)
+- Optional exclusion of database with `--exclude-db`
+- PyInstaller bundle build & deploy (`--bundle`, `--bundle-console`)
+- Smarter startup scripts that auto-create a per-user virtual environment or prefer a bundled executable if present
+
+See `DEPLOY.md` for full details and advanced usage.
 ## 📊 Usage Guide
 
 ### Environment Variables

@@ -448,7 +448,12 @@ def get_project_tree_data():
     return nodes
 
 def create_tree_visualization():
-    """Create Plotly tree visualization."""
+    """Create Plotly tree visualization with rich hover for sign nodes.
+
+    Hover behavior:
+      - Project/Building nodes: simple name + aggregated total (already in label)
+      - Sign nodes: dynamic tooltip containing sign type metrics (dimensions, area, unit_price, price_per_sq_ft, material_multiplier)
+    """
     nodes = get_project_tree_data()
     if not nodes:
         return go.Figure()
@@ -463,6 +468,17 @@ def create_tree_visualization():
     for level, lvl_nodes in levels.items():
         for i, n in enumerate(lvl_nodes):
             pos[n['id']] = (level * x_gap, i * y_gap)
+
+    # Pre-fetch sign type details for fast lookup
+    conn = sqlite3.connect(DATABASE_PATH)
+    try:
+        st_df = pd.read_sql_query('SELECT name, unit_price, width, height, price_per_sq_ft, material_multiplier, material, description FROM sign_types', conn)
+    except Exception:
+        st_df = pd.DataFrame(columns=['name','unit_price','width','height','price_per_sq_ft','material_multiplier','material','description'])
+    finally:
+        conn.close()
+    st_map = {r['name']: r for _, r in st_df.iterrows()}
+
     # Build edge coordinate arrays (ultra-thin lines)
     edge_x = []
     edge_y = []
@@ -477,14 +493,53 @@ def create_tree_visualization():
         fig.add_trace(go.Scatter(x=edge_x, y=edge_y, mode='lines', line=dict(color='#cccccc', width=0.5), hoverinfo='none', showlegend=False))
     color_map = {'project': '#1f77b4', 'building': '#ff7f0e', 'sign': '#2ca02c'}
     for lvl, lvl_nodes in levels.items():
+        # Build per-node hover text
+        texts = []
+        customdata = []
+        hovertemplate = []
+        for n in lvl_nodes:
+            if n['type'] != 'sign':
+                texts.append(n['label'])
+                customdata.append(['','','','','',''])
+                hovertemplate.append('%{text}<extra></extra>')
+            else:
+                # Parse sign name (label pattern: "<name> (qty)" or "Group: ...")
+                raw = n['label']
+                base_name = raw.split('(')[0].strip()
+                if base_name.startswith('Group:'):
+                    base_name = base_name.replace('Group:','').strip()
+                info = st_map.get(base_name)
+                if info is None:
+                    texts.append(raw)
+                    customdata.append(['','','','','',''])
+                    hovertemplate.append('%{text}<extra></extra>')
+                else:
+                    width = info.get('width') or 0
+                    height = info.get('height') or 0
+                    area = (width or 0) * (height or 0)
+                    unit_price = info.get('unit_price') or 0
+                    ppsf = info.get('price_per_sq_ft') or 0
+                    mult = info.get('material_multiplier') or 0
+                    material = info.get('material') or ''
+                    desc = (info.get('description') or '')[:120]
+                    texts.append(n['label'])
+                    customdata.append([f"{width}", f"{height}", f"{area}", f"{unit_price}", f"{ppsf}", f"{mult}"])
+                    hovertemplate.append(
+                        '<b>' + base_name + '</b><br>' +
+                        ('<i>' + desc + '</i><br>' if desc else '') +
+                        f"Material: {material}<br>" +
+                        "W: %{customdata[0]}  H: %{customdata[1]}  Area: %{customdata[2]} <br>" +
+                        "Unit Price: $%{customdata[3]}  $/SqFt: %{customdata[4]}  Mult: %{customdata[5]}<extra></extra>"
+                    )
         fig.add_trace(go.Scatter(
             x=[pos[n['id']][0] for n in lvl_nodes],
             y=[pos[n['id']][1] for n in lvl_nodes],
             mode='markers+text',
             marker=dict(size=15, color=[color_map.get(n['type'], '#4a90e2') for n in lvl_nodes]),
-            text=[n['label'] for n in lvl_nodes],
+            text=texts,
             textposition='middle right',
-            hoverinfo='text',
+            customdata=customdata,
+            hovertemplate=hovertemplate,
             name=f'Level {lvl}'
         ))
     fig.update_layout(
@@ -493,7 +548,8 @@ def create_tree_visualization():
         yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
         height=600,
         margin=dict(l=10, r=10, t=40, b=10),
-        showlegend=False
+        showlegend=False,
+        hovermode='closest'
     )
     return fig
 
@@ -607,7 +663,11 @@ def render_projects_tab():
                         ], md=4)
                     ]),
                     # Tree figure populated asynchronously by init callback; avoids layout-time exceptions blocking tab
-                    html.Div(id='project-tree-wrapper', children=dcc.Graph(id='project-tree'))
+                    html.Div(id='project-tree-wrapper', children=[
+                        dcc.Graph(id='project-tree'),
+                        # Hover panel for interactive (cyto) mode (initially hidden)
+                        html.Div(id='cyto-hover-panel', style={'position':'absolute','top':'60px','right':'25px','zIndex':1050,'display':'none','maxWidth':'340px'})
+                    ], style={'position':'relative'})
                 ])
             ]),
             dcc.Download(id='tree-png-download'),
@@ -789,6 +849,25 @@ def render_signs_tab():
             dbc.Card([
                 dbc.CardHeader(html.H4("Sign Types")),
                 dbc.CardBody([
+                    dbc.Row([
+                        dbc.Col([
+                            dbc.Label("Rows per page"),
+                            dcc.Dropdown(
+                                id='signs-page-size-dropdown',
+                                options=[
+                                    {'label':'10','value':10},
+                                    {'label':'25','value':25},
+                                    {'label':'50','value':50},
+                                    {'label':'100','value':100},
+                                    {'label':'All','value':-1}
+                                ],
+                                value=10,
+                                clearable=False,
+                                style={'width':'140px'}
+                            )
+                        ], width='auto'),
+                        dbc.Col(className='flex-grow-1')
+                    ], className='g-3 mb-2 align-items-end'),
                     dash_table.DataTable(
                         id="signs-table",
                         columns=[
@@ -1250,6 +1329,7 @@ def manual_import_book2(n):
     Output('project-edit-dropdown', 'options', allow_duplicate=True),
     Output('projects-debug-list','children', allow_duplicate=True),
     Input('create-project-btn', 'n_clicks'),
+    Input('main-tabs','active_tab'),
     State('project-name-input', 'value'),
     State('project-desc-input', 'value'),
     State('sales-tax-input', 'value'),
@@ -1258,46 +1338,53 @@ def manual_import_book2(n):
     State('include-sales-tax-input', 'value'),
     prevent_initial_call=True
 )
-def create_or_refresh_projects(n_clicks, name, desc, sales_tax, install_rate, include_install_values, include_tax_values):
-    if not n_clicks:
+def create_or_refresh_projects(n_clicks, active_tab, name, desc, sales_tax, install_rate, include_install_values, include_tax_values):
+    """Create a project or hydrate existing list when Projects tab first shown.
+
+    Logic:
+    - If triggered by tab activation (active_tab == 'projects-tab') and no click happened yet, just load existing projects.
+    - If triggered by button click, attempt to create then reload list.
+    """
+    triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
+    hydrate_only = ('main-tabs' in triggered and active_tab == 'projects-tab' and not n_clicks)
+    create_mode = ('create-project-btn' in triggered)
+    if not (hydrate_only or create_mode):
         raise PreventUpdate
-    if not name:  # early validation
-        return (
-            dash.no_update,  # projects-list
-            dbc.Alert("Project name required", color='danger'),  # feedback
-            dash.no_update,  # tree fig
-            dash.no_update,  # assign-project-dropdown options
-            dash.no_update,  # project-edit-dropdown options
-            dash.no_update   # projects-debug-list
-        )
     try:
         conn = sqlite3.connect(DATABASE_PATH)
         cur = conn.cursor()
-        cur.execute("INSERT INTO projects (name, description, sales_tax_rate, installation_rate, include_installation, include_sales_tax) VALUES (?,?,?,?,?,?)", (
-            name.strip(),
-            desc or '',
-            float(sales_tax or 0)/100.0,
-            float(install_rate or 0)/100.0,
-            1 if (include_install_values and 1 in include_install_values) else 0,
-            1 if (include_tax_values and 1 in include_tax_values) else 0
-        ))
-        conn.commit()
-        # Reload project list/options
+        feedback = dash.no_update
+        if create_mode:
+            if not name:
+                return (dash.no_update, dbc.Alert("Project name required", color='danger'), dash.no_update, dash.no_update, dash.no_update, dash.no_update)
+            try:
+                cur.execute("INSERT INTO projects (name, description, sales_tax_rate, installation_rate, include_installation, include_sales_tax) VALUES (?,?,?,?,?,?)", (
+                    name.strip(),
+                    desc or '',
+                    float(sales_tax or 0)/100.0,
+                    float(install_rate or 0)/100.0,
+                    1 if (include_install_values and 1 in include_install_values) else 0,
+                    1 if (include_tax_values and 1 in include_tax_values) else 0
+                ))
+                conn.commit()
+                feedback = dbc.Alert(f"Project '{name}' created", color='success', dismissable=True)
+            except sqlite3.IntegrityError:
+                feedback = dbc.Alert(f"Project '{name}' already exists", color='warning')
+            except Exception as e:
+                return dash.no_update, dbc.Alert(f"Error: {e}", color='danger'), dash.no_update, dash.no_update, dash.no_update, dash.no_update
         df = pd.read_sql_query("SELECT id, name, created_date FROM projects ORDER BY id DESC", conn)
         conn.close()
         if df.empty:
             list_children = html.Div("No projects yet.")
             project_options = []
+            debug_txt = 'none'
         else:
             rows = [html.Li(f"{r.name} (ID {r.id}) - {r.created_date}") for r in df.itertuples()]
             list_children = html.Ul(rows, className="mb-0")
             project_options = [{"label": r.name, "value": r.id} for r in df.itertuples()]
+            debug_txt = ' | '.join(f"{r.id}:{r.name}" for r in df.itertuples())
         tree_fig = safe_tree_figure()
-        feedback = dbc.Alert(f"Project '{name}' created", color='success', dismissable=True)
-        debug_txt = ' | '.join(f"{r.id}:{r.name}" for r in df.itertuples()) if not df.empty else 'none'
         return list_children, feedback, tree_fig, project_options, project_options, debug_txt
-    except sqlite3.IntegrityError:
-        return dash.no_update, dbc.Alert(f"Project '{name}' already exists", color='warning'), dash.no_update, dash.no_update, dash.no_update, dash.no_update
     except Exception as e:
         return dash.no_update, dbc.Alert(f"Error: {e}", color='danger'), dash.no_update, dash.no_update, dash.no_update, dash.no_update
 
@@ -1985,67 +2072,138 @@ def export_estimate_pdf(n_clicks, table_data, summary_children, pdf_title):
         raise PreventUpdate
     try:
         from reportlab.lib.pagesizes import LETTER
-        from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image
+        from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image,
+                                        PageBreak)
         from reportlab.lib import colors
-        from reportlab.lib.styles import getSampleStyleSheet
+        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+        from reportlab.pdfgen import canvas as _canvas
         import tempfile
+
         # Build PDF in memory
         buf = io.BytesIO()
-        doc = SimpleDocTemplate(buf, pagesize=LETTER, leftMargin=36, rightMargin=36, topMargin=54, bottomMargin=36)
         styles = getSampleStyleSheet()
+        # Custom styles
+        styles.add(ParagraphStyle(name='MetaLabel', fontSize=8, textColor=colors.grey, leading=10))
+        styles.add(ParagraphStyle(name='MetaValue', fontSize=9, leading=11))
+        styles.add(ParagraphStyle(name='Small', fontSize=7, leading=9))
+        title_text = (pdf_title or 'Sign Estimation Project Export').strip()
+
+        # Page decorator
+        def _footer(canvas: _canvas.Canvas, doc):
+            canvas.saveState()
+            footer_text = f"© 2025 LSI Graphics, LLC  |  Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  Page {doc.page}"  # noqa
+            canvas.setFont('Helvetica',7)
+            canvas.setFillColor(colors.grey)
+            canvas.drawCentredString(LETTER[0]/2, 22, footer_text)
+            canvas.restoreState()
+
+        doc = SimpleDocTemplate(
+            buf,
+            pagesize=LETTER,
+            leftMargin=40,
+            rightMargin=40,
+            topMargin=72,
+            bottomMargin=40
+        )
         story = []
-        # Logo (convert SVG to PNG if possible)
+        # Cover / Header
         logo_path = Path('assets') / 'LSI_Logo.svg'
         png_temp = None
         try:
             import cairosvg
             if logo_path.exists():
                 tmpf = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                cairosvg.svg2png(url=str(logo_path), write_to=tmpf.name, output_width=320)
+                cairosvg.svg2png(url=str(logo_path), write_to=tmpf.name, output_width=300)
                 png_temp = tmpf.name
         except Exception:
             png_temp = None
         if png_temp and Path(png_temp).exists():
             try:
-                story.append(Image(png_temp, width=200, height=60))
-                story.append(Spacer(1,12))
+                story.append(Image(png_temp, width=220, height=66))
+                story.append(Spacer(1, 16))
             except Exception:
                 pass
-        title_text = pdf_title.strip() if pdf_title else 'Sign Estimation Project Export'
-        story.append(Paragraph(title_text, styles['Title']))
-        story.append(Spacer(1,12))
-        # Summary text (extract plain strings)
+        story.append(Paragraph(f'<para align="left"><font size=20><b>{title_text}</b></font></para>', styles['Normal']))
+        story.append(Spacer(1, 12))
+
+        # Extract summary text
         if isinstance(summary_children, (list, tuple)):
             summary_text = ' '.join(str(c) for c in summary_children if c)
         else:
             summary_text = str(summary_children)
-        story.append(Paragraph(summary_text, styles['Normal']))
-        story.append(Spacer(1,12))
-        # Table
-        headers = ['Building','Item','Material','Dimensions','Quantity','Unit_Price','Total']
+        if summary_text.strip():
+            story.append(Paragraph(summary_text, styles['BodyText']))
+            story.append(Spacer(1, 14))
+
+        # Derive high-level metrics from table_data
+        total_value = 0.0
+        building_totals = {}
+        for r in table_data:
+            try:
+                amt = float(r.get('Total') or 0)
+            except Exception:
+                amt = 0.0
+            total_value += amt
+            b = r.get('Building')
+            if b and b not in ('ALL',''):
+                building_totals.setdefault(b, 0.0)
+                building_totals[b] += amt
+        # Metadata table data
+        meta_rows = []
+        meta_rows.append(['Generated', datetime.now().strftime('%Y-%m-%d %H:%M')])
+        meta_rows.append(['Total Value', f"$ {total_value:,.2f}"])
+        if building_totals:
+            # Top 3 buildings (value desc)
+            for name, val in sorted(building_totals.items(), key=lambda x: x[1], reverse=True)[:3]:
+                meta_rows.append([f"Building: {name}", f"$ {val:,.2f}"])
+        meta_tbl = Table(meta_rows, hAlign='LEFT', colWidths=[130, 200])
+        meta_tbl.setStyle(TableStyle([
+            ('FONTNAME',(0,0),(-1,-1),'Helvetica'),
+            ('FONTSIZE',(0,0),(-1,-1),8),
+            ('BOTTOMPADDING',(0,0),(-1,-1),2),
+            ('TOPPADDING',(0,0),(-1,-1),1)
+        ]))
+        story.append(meta_tbl)
+        story.append(Spacer(1, 18))
+
+        # Detailed line items table
+        headers = ['Building','Item','Material','Dimensions','Qty','Unit $','Line Total']
         rows = [headers]
         for r in table_data:
+            u = r.get('Unit_Price','')
+            t = r.get('Total','')
+            try:
+                u_fmt = f"$ {float(u):,.2f}" if str(u).strip() != '' else ''
+            except Exception:
+                u_fmt = str(u)
+            try:
+                t_fmt = f"$ {float(t):,.2f}" if str(t).strip() != '' else ''
+            except Exception:
+                t_fmt = str(t)
             rows.append([
                 r.get('Building',''), r.get('Item',''), r.get('Material',''), r.get('Dimensions',''),
-                r.get('Quantity',''), f"{r.get('Unit_Price','')}", f"{r.get('Total','')}"
+                r.get('Quantity',''), u_fmt, t_fmt
             ])
-        tbl = Table(rows, repeatRows=1)
-        tbl.setStyle(TableStyle([
-            ('BACKGROUND',(0,0),(-1,0), colors.HexColor('#4a90e2')),
-            ('TEXTCOLOR',(0,0),(-1,0), colors.white),
+        detail_tbl = Table(rows, repeatRows=1, colWidths=[70,110,70,70,35,60,70])
+        detail_tbl.setStyle(TableStyle([
+            ('BACKGROUND',(0,0),(-1,0), colors.HexColor('#1f4e79')),
+            ('TEXTCOLOR',(0,0),(-1,0), colors.whitesmoke),
             ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
+            ('FONTSIZE',(0,0),(-1,0),9),
             ('ALIGN',(0,0),(-1,0),'LEFT'),
-            ('FONTSIZE',(0,0),(-1,0),10),
-            ('GRID',(0,0),(-1,-1),0.25, colors.gray),
-            ('FONTSIZE',(0,1),(-1,-1),8),
+            ('GRID',(0,0),(-1,-1),0.25, colors.HexColor('#b0b0b0')),
+            ('FONTSIZE',(0,1),(-1,-1),7),
             ('VALIGN',(0,0),(-1,-1),'TOP'),
-            ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.Color(0.96,0.96,0.96)])
+            ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.Color(0.97,0.97,0.97)]),
+            ('ALIGN',(-2,1),(-1,-1),'RIGHT'),
+            ('RIGHTPADDING',(-2,0),(-1,-1),4),
+            ('LEFTPADDING',(0,0),(-1,-1),4)
         ]))
-        story.append(tbl)
-        story.append(Spacer(1,18))
-        footer_para = Paragraph('© 2025 LSI Graphics, LLC — Generated by Sign Estimation Tool', styles['Italic'])
-        story.append(footer_para)
-        doc.build(story)
+        story.append(detail_tbl)
+        story.append(Spacer(1, 20))
+        story.append(Paragraph('<font size=8 color="#666666">Prepared using the internal Sign Estimation Tool. Figures are for estimation purposes only.</font>', styles['Normal']))
+
+        doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
         buf.seek(0)
         b64 = base64.b64encode(buf.read()).decode()
         return dict(content=b64, filename='estimate.pdf', type='application/pdf')
@@ -2148,11 +2306,41 @@ def export_tree_png(n_clicks, fig_dict):
 def switch_tree_view(mode):
     if mode == 'cyto':
         nodes = get_project_tree_data()
+        # Preload sign types metadata
+        conn = sqlite3.connect(DATABASE_PATH)
+        try:
+            st_df = pd.read_sql_query('SELECT name, unit_price, width, height, price_per_sq_ft, material_multiplier, material, description FROM sign_types', conn)
+        except Exception:
+            st_df = pd.DataFrame(columns=['name','unit_price','width','height','price_per_sq_ft','material_multiplier','material','description'])
+        finally:
+            conn.close()
+        st_map = {r['name']: r for _, r in st_df.iterrows()}
         elements = []
         id_map = {n['id']: n for n in nodes}
         for n in nodes:
-            # label already contains totals for project/building nodes; show sign names directly
-            elements.append({'data': {'id': n['id'], 'label': n['label']}, 'classes': n['type']})
+            data = {'id': n['id'], 'label': n['label'], 'type': n['type']}
+            if n['type'] == 'sign':
+                raw = n['label']
+                base_name = raw.split('(')[0].strip()
+                if base_name.startswith('Group:'):
+                    base_name = base_name.replace('Group:','').strip()
+                info = st_map.get(base_name)
+                if info:
+                    width = info.get('width') or 0
+                    height = info.get('height') or 0
+                    area = (width or 0) * (height or 0)
+                    data.update({
+                        'sign_name': base_name,
+                        'material': info.get('material') or '',
+                        'description': (info.get('description') or '')[:160],
+                        'width': width,
+                        'height': height,
+                        'area': area,
+                        'unit_price': info.get('unit_price') or 0,
+                        'price_per_sq_ft': info.get('price_per_sq_ft') or 0,
+                        'material_multiplier': info.get('material_multiplier') or 0
+                    })
+            elements.append({'data': data, 'classes': n['type']})
         for n in nodes:
             parent = n.get('parent')
             if parent and parent in id_map:
@@ -2169,7 +2357,8 @@ def switch_tree_view(mode):
             elements=elements,
             layout={'name':'breadthfirst','directed':True,'spacingFactor':1.25,'padding':15},
             style={'width':'100%','height':'600px'},
-            stylesheet=stylesheet
+            stylesheet=stylesheet,
+            generateImage=False
         )
     return dcc.Graph(id='project-tree', figure=safe_tree_figure())
 
@@ -2391,6 +2580,21 @@ def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
         return cleaned, f'Saved {saved} rows'
     raise PreventUpdate
 
+# Dynamic page size control for sign types table
+@app.callback(
+    Output('signs-table','page_size'),
+    Input('signs-page-size-dropdown','value'),
+    State('signs-table','data'),
+    prevent_initial_call=True
+)
+def update_signs_page_size(size, rows):
+    if size is None:
+        raise PreventUpdate
+    if size == -1:
+        # All rows
+        return len(rows) if rows else 10000
+    return size
+
 # Tiny debug stats updater (tab focused or after save/import) 
 @app.callback(
     Output('debug-signs-stats','children'),
@@ -2428,6 +2632,49 @@ def hide_debug_card(n):
     if not n:
         raise PreventUpdate
     return {'display':'none'}
+
+# ------------------ Cytoscape Hover Panel ------------------ #
+@app.callback(
+    Output('cyto-hover-panel','children'),
+    Output('cyto-hover-panel','style'),
+    Input('project-tree-wrapper','children'),  # placeholder to allow dynamic component existence
+    Input('project-tree-cyto','mouseoverData'),
+    prevent_initial_call=True
+)
+def cyto_hover(_wrapper_children, mouseover):
+    # If cytoscape not rendered yet or no hover data
+    if not mouseover or 'data' not in mouseover:
+        raise PreventUpdate
+    data = mouseover.get('data') or {}
+    if data.get('type') != 'sign':
+        # Hide panel for non-sign nodes
+        return dash.no_update, {'display':'none'}
+    # Build panel
+    def fmt(num):
+        try:
+            return f"{float(num):,.2f}"
+        except Exception:
+            return str(num)
+    header = data.get('sign_name') or data.get('label')
+    body = dbc.Card([
+        dbc.CardHeader(html.Strong(header)),
+        dbc.CardBody([
+            html.Div(data.get('description') or '', className='mb-2 small'),
+            html.Table([
+                html.Tbody([
+                    html.Tr([html.Th('Material', className='pe-2'), html.Td(data.get('material') or '-')]),
+                    html.Tr([html.Th('Width'), html.Td(fmt(data.get('width')))]),
+                    html.Tr([html.Th('Height'), html.Td(fmt(data.get('height')))]),
+                    html.Tr([html.Th('Area'), html.Td(fmt(data.get('area')))]),
+                    html.Tr([html.Th('Unit Price'), html.Td(f"$ {fmt(data.get('unit_price'))}")]),
+                    html.Tr([html.Th('$ / SqFt'), html.Td(fmt(data.get('price_per_sq_ft')))]),
+                    html.Tr([html.Th('Multiplier'), html.Td(fmt(data.get('material_multiplier')))])
+                ])
+            ], className='table table-sm mb-0')
+        ])
+    ], className='shadow-sm')
+    style = {'position':'absolute','top':'60px','right':'25px','zIndex':1050,'display':'block','maxWidth':'340px'}
+    return body, style
 
 # ------------------ Material Pricing CRUD & Recalc ------------------ #
 @app.callback(
