@@ -4,7 +4,11 @@ from pathlib import Path
 from PyInstaller.utils.hooks import collect_submodules
 
 block_cipher = None
-project_root = Path(__file__).parent
+try:
+    _spec_file = globals().get('__file__')
+except Exception:
+    _spec_file = None
+project_root = Path(_spec_file).parent if _spec_file else Path.cwd()
 app_script = str(project_root / 'app.py')
 
 hidden = set()

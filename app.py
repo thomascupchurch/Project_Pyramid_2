@@ -164,118 +164,7 @@ if ONEDRIVE_SYNC_DIR and ONEDRIVE_AUTOSYNC_SEC > 0:
             time.sleep(ONEDRIVE_AUTOSYNC_SEC)
     threading.Thread(target=_autosync_loop, daemon=True).start()
 
-# ------------------ Initial Sign Types Auto-Load ------------------ #
-def _sign_types_count():
-    conn = sqlite3.connect(DATABASE_PATH)
-    cur = conn.cursor()
-    cur.execute("SELECT COUNT(1) FROM sign_types")
-    count = cur.fetchone()[0]
-    conn.close()
-    return count
-
-def _load_sign_types_from_df(df: pd.DataFrame) -> int:
-    """Insert/merge sign types from DataFrame. Returns number inserted/updated."""
-    required_cols_map = {
-        'name': ['name','sign_name','Sign Name'],
-        'description': ['description','desc','Description'],
-        'unit_price': ['unit_price','price','Price','Unit Price'],
-        'material': ['material','Material'],
-        'width': ['width','Width','W'],
-        'height': ['height','Height','H'],
-        'price_per_sq_ft': ['price_per_sq_ft','Price/Sq Ft','price_sqft']
-    }
-    # Normalize columns
-    norm_df = pd.DataFrame()
-    for target, aliases in required_cols_map.items():
-        for alias in aliases:
-            if alias in df.columns:
-                norm_df[target] = df[alias]
-                break
-        if target not in norm_df.columns:
-            # Fill missing numeric with 0, text with ''
-            if target in ('unit_price','width','height','price_per_sq_ft'):
-                norm_df[target] = 0
-            else:
-                norm_df[target] = ''
-    # Coerce numeric-like strings
-    def _coerce_numeric(val):
-        if pd.isna(val):
-            return 0
-        if isinstance(val,(int,float)):
-            return val
-        if isinstance(val,str):
-            txt = val.strip().replace('$','').replace(',','')
-            try:
-                return float(txt) if txt else 0
-            except:
-                return 0
-        try:
-            return float(val)
-        except:
-            return 0
-    for _c in ['unit_price','width','height','price_per_sq_ft']:
-        norm_df[_c] = norm_df[_c].apply(_coerce_numeric)
-    # Compute price_per_sq_ft if absent but width/height/unit_price present
-    calc_mask = (norm_df['price_per_sq_ft']==0) & (norm_df['width']>0) & (norm_df['height']>0) & (norm_df['unit_price']>0)
-    norm_df.loc[calc_mask,'price_per_sq_ft'] = norm_df.loc[calc_mask].apply(lambda r: (r['unit_price'] / (r['width']*r['height'])) if r['width']*r['height'] else 0, axis=1)
-    # Drop duplicates (case-insensitive name) keeping first
-    norm_df['__name_key'] = norm_df['name'].astype(str).str.strip().str.lower()
-    norm_df = norm_df.drop_duplicates('__name_key')
-    # Upsert rows
-    conn = sqlite3.connect(DATABASE_PATH)
-    cur = conn.cursor()
-    inserted = 0
-    for row in norm_df.itertuples():
-        name = str(row.name).strip()
-        if not name:
-            continue
-        cur.execute('''
-            INSERT INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height)
-            VALUES (?,?,?,?,?,?,?)
-            ON CONFLICT(name) DO UPDATE SET
-              description=excluded.description,
-              unit_price=excluded.unit_price,
-              material=excluded.material,
-              price_per_sq_ft=excluded.price_per_sq_ft,
-              width=excluded.width,
-              height=excluded.height
-        ''', (
-            name,
-            str(row.description or ''),
-            float(row.unit_price or 0),
-            str(row.material or ''),
-            float(row.price_per_sq_ft or 0),
-            float(row.width or 0),
-            float(row.height or 0)
-        ))
-        inserted += 1
-    conn.commit()
-    conn.close()
-    return inserted
-
-def auto_load_initial_sign_types():
-    if _sign_types_count() > 0:
-        return 0, None
-    csv_path_env = os.getenv('SIGN_APP_INITIAL_CSV')
-    candidates = []
-    if csv_path_env:
-        candidates.append(Path(csv_path_env))
-    candidates.append(Path(__file__).parent / 'initial_sign_types.csv')
-    for candidate in candidates:
-        if candidate.exists():
-            try:
-                df = pd.read_csv(candidate)
-                count = _load_sign_types_from_df(df)
-                print(f"Loaded {count} sign types from {candidate}")
-                return count, str(candidate)
-            except Exception as e:
-                print(f"Failed loading sign types from {candidate}: {e}")
-                return 0, None
-    return 0, None
-
-_loaded_count, _loaded_source = auto_load_initial_sign_types()
-if _loaded_count:
-    print(f"Auto-initialized sign_types with {_loaded_count} rows from {_loaded_source}")
+## Legacy single-image upload callback removed (replaced by multi-image system) – stray code block cleaned.
 
 # Attempt secondary import from Book2.csv if dataset appears empty/minimal
 def _attempt_import_book2():
@@ -971,17 +860,20 @@ def render_signs_tab():
                             dcc.Dropdown(id='sign-image-sign-dropdown', options=[{'label':r['name'],'value':r['name']} for r in preload_records], placeholder='Choose sign type...')
                         ], width=6),
                         dbc.Col([
-                            dbc.Label('Upload Image'),
+                            dbc.Label('Upload Images'),
                             dcc.Upload(
                                 id='sign-image-upload',
-                                children=html.Div(['Drag & Drop or ', html.A('Select File')]),
-                                multiple=False,
+                                children=html.Div(['Drag & Drop or ', html.A('Select Files')]),
+                                multiple=True,
                                 style={'border':'1px dashed #888','padding':'12px','textAlign':'center','cursor':'pointer'}
-                            )
+                            ),
+                            html.Small('You can select multiple images. First upload sets cover if none present.', className='text-muted')
                         ], width=6)
                     ]),
                     html.Div(id='sign-image-upload-feedback', className='mt-2'),
-                    html.Small('Supported: PNG/JPG/GIF/SVG. Stored under sign_images/. Re-upload to replace.', className='text-muted')
+                    html.Small('Supported: PNG/JPG/GIF/SVG. Stored under sign_images/. You can delete or set cover below.', className='text-muted'),
+                    html.Hr(),
+                    html.Div(id='sign-image-gallery')
                 ])
             ], className='mt-3'),
             dbc.Card([
@@ -1212,8 +1104,36 @@ def render_estimates_tab():
                         dbc.Col([
                             dcc.Download(id='estimate-download'),
                             dcc.Download(id='estimate-pdf-download')
+                        ], md=2),
+                        dbc.Col([
+                            dbc.Checklist(
+                                id='embed-images-toggle',
+                                options=[{'label':'Embed Images in Exports','value':'embed'}],
+                                value=['embed'],
+                                className='mt-4',
+                                switch=True
+                            )
+                        ], md=3),
+                        dbc.Col([
+                            dbc.Checklist(
+                                id='exterior-only-toggle',
+                                options=[{'label':'Exterior Only','value':'ext_only'}],
+                                value=[],
+                                className='mt-4',
+                                switch=True
+                            )
+                        ], md=2),
+                        dbc.Col([
+                            dbc.Checklist(
+                                id='non-exterior-only-toggle',
+                                options=[{'label':'Non-Exterior Only','value':'non_ext_only'}],
+                                value=[],
+                                className='mt-4',
+                                switch=True
+                            )
                         ], md=2)
                     ], className='mb-3 g-2'),
+                    dcc.Store(id='embed-images-store', data={'embed': True}),
                     dbc.Accordion([
                         dbc.AccordionItem([
                             dbc.Row([
@@ -1307,6 +1227,216 @@ def render_import_tab():
         ])
     ])
 
+# ------------------ Embed Images Toggle Sync ------------------ #
+@app.callback(
+    Output('embed-images-store','data'),
+    Input('embed-images-toggle','value'),
+    prevent_initial_call=False
+)
+def sync_embed_toggle(values):
+    # values is list like ['embed'] when on, or [] when off
+    try:
+        embed_on = 'embed' in (values or [])
+    except Exception:
+        embed_on = True
+    return {'embed': embed_on}
+
+# ------------------ Sign Type Multi-Image Management ------------------ #
+@app.callback(
+    Output('sign-image-upload-feedback','children'),
+    Output('sign-image-gallery','children'),
+    Input('sign-image-upload','contents'),
+    State('sign-image-upload','filename'),
+    State('sign-image-sign-dropdown','value'),
+    prevent_initial_call=True
+)
+def handle_sign_type_multi_image(contents_list, filenames, sign_name):
+    if not contents_list or not sign_name:
+        raise PreventUpdate
+    if not isinstance(contents_list, list):
+        # Dash may pass single as string
+        contents_list = [contents_list]
+        filenames = [filenames]
+    saved = 0
+    errors = []
+    from hashlib import sha1
+    img_dir = Path('sign_images'); img_dir.mkdir(exist_ok=True)
+    conn = sqlite3.connect(DATABASE_PATH)
+    cur = conn.cursor()
+    # fetch sign_type id
+    cur.execute('SELECT id, image_path FROM sign_types WHERE name=?', (sign_name,))
+    row = cur.fetchone()
+    if not row:
+        conn.close(); return dbc.Alert('Sign type not found', color='danger'), dash.no_update
+    sign_type_id, cover_path = row
+    try:
+        cur.execute('SELECT COUNT(*) FROM sign_type_images WHERE sign_type_id=?', (sign_type_id,))
+        existing_count = cur.fetchone()[0]
+    except Exception:
+        existing_count = 0
+    for content, fname in zip(contents_list, filenames):
+        try:
+            header, b64data = content.split(',',1)
+            raw = base64.b64decode(b64data)
+            ext = ''.join(Path(fname).suffix.split()) or '.bin'
+            digest = sha1(raw).hexdigest()[:16]
+            out_name = f"{sign_type_id}_{digest}{ext}"
+            out_path = img_dir / out_name
+            out_path.write_bytes(raw)
+            # insert into sign_type_images
+            cur.execute('INSERT INTO sign_type_images (sign_type_id, image_path, display_order, created_at, file_hash) VALUES (?,?,?,?,?)',
+                        (sign_type_id, str(out_path), existing_count + saved + 1, datetime.now().isoformat(timespec='seconds'), digest))
+            # set cover if none or first image and sign_types.image_path empty
+            if not cover_path:
+                cur.execute('UPDATE sign_types SET image_path=? WHERE id=?', (str(out_path), sign_type_id))
+                cover_path = str(out_path)
+            saved += 1
+        except Exception as e:
+            errors.append(f"{fname}: {e}")
+    conn.commit(); conn.close()
+    feedback_children = []
+    if saved:
+        feedback_children.append(dbc.Alert(f"Uploaded {saved} image(s) for {sign_name}", color='success'))
+    if errors:
+        feedback_children.append(dbc.Alert('Errors: ' + '; '.join(errors), color='warning'))
+    return feedback_children, _render_sign_image_gallery(sign_name)
+
+
+@app.callback(
+    Output('sign-image-gallery','children', allow_duplicate=True),
+    Input('sign-image-sign-dropdown','value'),
+    prevent_initial_call=True
+)
+def refresh_gallery_on_select(sign_name):
+    if not sign_name:
+        raise PreventUpdate
+    return _render_sign_image_gallery(sign_name)
+
+
+@app.callback(
+    Output('sign-image-gallery','children', allow_duplicate=True),
+    Input({'action':'sign-image-set-cover','path':dash.ALL}, 'n_clicks'),
+    State('sign-image-sign-dropdown','value'),
+    prevent_initial_call=True
+)
+def set_cover_image(n_clicks_list, sign_name):
+    ctx = dash.callback_context
+    if not ctx.triggered or not sign_name:
+        raise PreventUpdate
+    trig = ctx.triggered[0]['prop_id'].split('.')[0]
+    try:
+        import json
+        meta = json.loads(trig)
+        path = meta.get('path')
+    except Exception:
+        raise PreventUpdate
+    if not path:
+        raise PreventUpdate
+    conn = sqlite3.connect(DATABASE_PATH)
+    cur = conn.cursor()
+    cur.execute('SELECT id FROM sign_types WHERE name=?', (sign_name,))
+    row = cur.fetchone()
+    if not row:
+        conn.close(); raise PreventUpdate
+    sign_type_id = row[0]
+    cur.execute('UPDATE sign_types SET image_path=? WHERE id=?', (path, sign_type_id))
+    conn.commit(); conn.close()
+    return _render_sign_image_gallery(sign_name)
+
+
+def _render_sign_image_gallery(sign_name: str):
+    conn = sqlite3.connect(DATABASE_PATH)
+    cur = conn.cursor()
+    cur.execute('SELECT id, image_path, display_order FROM sign_type_images sti JOIN sign_types st ON sti.sign_type_id=st.id WHERE st.name=? ORDER BY display_order', (sign_name,))
+    rows = cur.fetchall()
+    cur.execute('SELECT image_path FROM sign_types WHERE name=?', (sign_name,))
+    cover = (cur.fetchone() or [None])[0]
+    conn.close()
+    if not rows:
+        return html.Div(html.I('No images uploaded yet.'), className='text-muted')
+    cards = []
+    for _id, path, order in rows:
+        is_cover = (str(path) == str(cover))
+        actions = [
+            dbc.Button('Set Cover', id={'action':'sign-image-set-cover','path':path}, color='secondary', size='sm', className='me-1', disabled=is_cover),
+            # Delete button handled in future callback (todo #3)
+            dbc.Button('Delete', id={'action':'sign-image-delete','path':path}, color='danger', size='sm', outline=True)
+        ]
+        style_border = '2px solid #157347' if is_cover else '1px solid #ccc'
+        cards.append(
+            dbc.Col(dbc.Card([
+                html.Div(html.Img(src=convert_path_to_data_url(path), style={'maxWidth':'100%','maxHeight':'120px','objectFit':'contain'}), className='p-2'),
+                dbc.CardFooter([
+                    html.Small(Path(path).name, className='d-block text-truncate', style={'maxWidth':'140px'}),
+                    html.Div(actions, className='mt-1')
+                ], style={'background':'#fafafa'})
+            ], style={'border':style_border,'boxShadow':'0 1px 2px rgba(0,0,0,0.08)'}, className='h-100'), width=3)
+        )
+    return dbc.Row(cards, className='g-2')
+
+def convert_path_to_data_url(path: str):
+    try:
+        p = Path(path)
+        if not p.exists():
+            return ''
+        data = p.read_bytes()
+        import mimetypes, base64
+        mt, _ = mimetypes.guess_type(p.name)
+        if not mt:
+            mt = 'application/octet-stream'
+        return f"data:{mt};base64,{base64.b64encode(data).decode()}"
+    except Exception:
+        return ''
+
+# Delete image callback (removes DB row + file and reassigns cover if needed)
+@app.callback(
+    Output('sign-image-gallery','children', allow_duplicate=True),
+    Input({'action':'sign-image-delete','path':dash.ALL}, 'n_clicks'),
+    State('sign-image-sign-dropdown','value'),
+    prevent_initial_call=True
+)
+def delete_sign_type_image(n_clicks_list, sign_name):
+    ctx = dash.callback_context
+    if not ctx.triggered or not sign_name:
+        raise PreventUpdate
+    trig = ctx.triggered[0]['prop_id'].split('.')[0]
+    try:
+        import json
+        meta = json.loads(trig)
+        path = meta.get('path')
+    except Exception:
+        raise PreventUpdate
+    if not path:
+        raise PreventUpdate
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        cur = conn.cursor()
+        # Get sign type id & current cover
+        cur.execute('SELECT id, image_path FROM sign_types WHERE name=?', (sign_name,))
+        row = cur.fetchone()
+        if not row:
+            conn.close(); raise PreventUpdate
+        sign_type_id, cover_path = row
+        # Delete the image row
+        cur.execute('DELETE FROM sign_type_images WHERE sign_type_id=? AND image_path=?', (sign_type_id, path))
+        # If it was cover, choose the next lowest display_order
+        if cover_path and str(cover_path) == str(path):
+            cur.execute('SELECT image_path FROM sign_type_images WHERE sign_type_id=? ORDER BY display_order LIMIT 1', (sign_type_id,))
+            next_cover = cur.fetchone()
+            new_cover = next_cover[0] if next_cover else None
+            cur.execute('UPDATE sign_types SET image_path=? WHERE id=?', (new_cover, sign_type_id))
+        conn.commit(); conn.close()
+    except Exception as e:
+        print(f"[sign-image-delete][error] {e}")
+    # Delete file from filesystem (best-effort)
+    try:
+        fp = Path(path)
+        if fp.exists():
+            fp.unlink()
+    except Exception as fe:
+        print(f"[sign-image-delete][file][warn] {fe}")
+    return _render_sign_image_gallery(sign_name)
+
 @app.callback(
     Output('upload-output', 'children'),
     Output('signs-table', 'data', allow_duplicate=True),
@@ -1323,7 +1453,28 @@ def update_output(contents, filename):
         try:
             # Assume CSV file
             df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
-            inserted = _load_sign_types_from_df(df)
+            # Minimal inline loader (previous helper removed during refactor)
+            conn = sqlite3.connect(DATABASE_PATH)
+            cur = conn.cursor()
+            inserted = 0
+            for r in df.to_dict('records'):
+                name = str(r.get('name') or r.get('Code') or r.get('Desc') or '').strip()
+                if not name:
+                    continue
+                unit_price = r.get('unit_price') or r.get('price') or 0
+                material = r.get('material') or r.get('Material') or ''
+                try:
+                    cur.execute('''
+                        INSERT INTO sign_types (name, description, unit_price, material)
+                        VALUES (?,?,?,?)
+                        ON CONFLICT(name) DO UPDATE SET description=excluded.description, unit_price=excluded.unit_price, material=excluded.material
+                    ''', (
+                        name[:120], str(r.get('description') or r.get('Desc') or '')[:255], float(unit_price or 0), str(material)[:120]
+                    ))
+                    inserted += 1
+                except Exception as ie:
+                    print(f"[import][warn] row skipped: {ie}")
+            conn.commit(); conn.close()
             # Reload table data after import
             conn = sqlite3.connect(DATABASE_PATH)
             table_df = pd.read_sql_query("SELECT name, description, unit_price, material, price_per_sq_ft, width, height FROM sign_types ORDER BY name", conn)
@@ -1971,9 +2122,13 @@ def update_runtime_status(_n):
     State('install-hours-input','value'),
     State('install-hourly-rate-input','value'),
     State('auto-install-use','value'),
+    State('embed-images-store','data'),
+    State('exterior-only-toggle','value'),
+    State('non-exterior-only-toggle','value'),
+    State('exterior-only-toggle','value'),
     prevent_initial_call=True
 )
-def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mode, inst_percent, inst_per_sign, inst_per_area, inst_hours, inst_hourly, auto_install_toggle):
+def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mode, inst_percent, inst_per_sign, inst_per_area, inst_hours, inst_hourly, auto_install_toggle, exterior_toggle, non_exterior_toggle, exterior_toggle_dup):
     if not n_clicks:
         raise PreventUpdate
     if db_manager is None:
@@ -2034,6 +2189,32 @@ def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mod
     if not estimate_data:
         return [], dbc.Alert("No data for selection", color='warning'), True
     df = pd.DataFrame(estimate_data)
+    # Exterior-only filter: install_type source needed. Join sign_types to determine classification.
+    # Harmonize toggles (Dash passes them as lists)
+    ext_only = exterior_toggle and 'ext_only' in exterior_toggle
+    non_ext_only = non_exterior_toggle and 'non_ext_only' in non_exterior_toggle
+    # If both toggles somehow enabled, prioritize no filter (user conflict); could also choose to raise-warning
+    if ext_only and non_ext_only:
+        ext_only = non_ext_only = False
+    exterior_filtered = False
+    non_exterior_filtered = False
+    if ext_only or non_ext_only:
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            it_map_df = pd.read_sql_query('SELECT name, install_type FROM sign_types', conn)
+            conn.close()
+            it_map = {r['name'].lower(): (r['install_type'] or '') for _, r in it_map_df.iterrows()}
+            def _is_ext(item):
+                base = (str(item).split('Group:')[-1].strip()).lower()
+                return 'ext' in (it_map.get(base, '') or '').lower()
+            if ext_only:
+                df = df[[ _is_ext(it) for it in df['Item'] ]]
+                exterior_filtered = True
+            elif non_ext_only:
+                df = df[[ (not _is_ext(it)) for it in df['Item'] ]]
+                non_exterior_filtered = True
+        except Exception as _fe:
+            print(f"[estimate][ext-only][warn] {_fe}")
     total = df['Total'].sum() if 'Total' in df else 0
     # Build chips & meta display
     chips = []
@@ -2056,6 +2237,10 @@ def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mod
         note_lines.append("Pricing basis: Area * Material Rate")
     if not use_default:
         note_lines.append(f"Install mode: {install_mode}")
+    if exterior_filtered:
+        chips.append(dbc.Badge("Filtered: Exterior Only", color='dark', className='me-1'))
+    if non_exterior_filtered:
+        chips.append(dbc.Badge("Filtered: Non-Exterior Only", color='dark', className='me-1'))
     summary = html.Div([
         html.Div(chips, className='mb-1'),
         html.Small(" | ".join(note_lines)) if note_lines else None
@@ -2077,7 +2262,7 @@ def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mod
     State('auto-install-use','value'),
     prevent_initial_call=True
 )
-def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode, inst_percent, inst_per_sign, inst_per_area, inst_hours, inst_hourly, auto_install_toggle):
+def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode, inst_percent, inst_per_sign, inst_per_area, inst_hours, inst_hourly, auto_install_toggle, embed_store):
     if not n_clicks:
         raise PreventUpdate
     # Normalize multi select
@@ -2231,26 +2416,17 @@ def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode,
                 except Exception:
                     pass
             # Optional thumbnail column (insert after A header if images present)
+            embed_images = True
             try:
-                if image_map:
+                embed_images = bool(embed_store and embed_store.get('embed'))
+            except Exception:
+                embed_images = True
+            try:
+                if image_map and embed_images:
                     # Add new column for thumbnails at column A shifting existing
                     ws.insert_cols(1, amount=1)
                     ws['A5'] = 'Image'
-                    from PIL import Image as PILImage
-                    import tempfile as _tmp
-                    def make_thumb(p: Path):
-                        try:
-                            if p.suffix.lower()=='.svg' and cairosvg:
-                                with NamedTemporaryFile(suffix='.png', delete=False) as tp:
-                                    cairosvg.svg2png(url=str(p), write_to=tp.name, output_width=120)
-                                    return tp.name
-                            im = PILImage.open(p).convert('RGBA')
-                            im.thumbnail((120,60))
-                            tf = _tmp.NamedTemporaryFile(suffix='.png', delete=False)
-                            im.save(tf.name, format='PNG')
-                            return tf.name
-                        except Exception:
-                            return None
+                    from utils.image_cache import get_or_build_thumbnail
                     max_row = ws.max_row
                     # Data starts at row 5 now (header offset + inserted rows) ; find column indexes for Item and Building to compute matching sign name
                     # Find 'Item' header (shifted one col to right due to insert).
@@ -2274,10 +2450,10 @@ def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode,
                             pth = image_map.get(key)
                             if not pth:
                                 continue
-                            tp = make_thumb(pth)
-                            if tp:
+                            tp = get_or_build_thumbnail(pth, 120, 60)
+                            if tp and Path(tp).exists():
                                 try:
-                                    thumb_img = XLImage(tp)
+                                    thumb_img = XLImage(str(tp))
                                     thumb_img.anchor = f"A{r_idx}"
                                     ws.add_image(thumb_img)
                                 except Exception:
@@ -2322,216 +2498,58 @@ def export_estimate_pdf(n_clicks, table_data, summary_children, pdf_title):
     if not table_data:
         raise PreventUpdate
     try:
-        from reportlab.lib.pagesizes import LETTER
-        from reportlab.platypus import (SimpleDocTemplate, Table, TableStyle, Paragraph, Spacer, Image,
-                                        PageBreak)
-        from reportlab.lib import colors
-        from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
-        from reportlab.pdfgen import canvas as _canvas
-        import tempfile
-
-        # Build PDF in memory
-        buf = io.BytesIO()
-        styles = getSampleStyleSheet()
-        # Custom styles
-        styles.add(ParagraphStyle(name='MetaLabel', fontSize=8, textColor=colors.grey, leading=10))
-        styles.add(ParagraphStyle(name='MetaValue', fontSize=9, leading=11))
-        styles.add(ParagraphStyle(name='Small', fontSize=7, leading=9))
-        title_text = (pdf_title or 'Sign Estimation Project Export').strip()
-
-        # Page decorator
-        def _footer(canvas: _canvas.Canvas, doc):
-            canvas.saveState()
-            footer_text = f"© 2025 LSI Graphics, LLC  |  Generated {datetime.now().strftime('%Y-%m-%d %H:%M')}  |  Page {doc.page}"  # noqa
-            canvas.setFont('Helvetica',7)
-            canvas.setFillColor(colors.grey)
-            canvas.drawCentredString(LETTER[0]/2, 22, footer_text)
-            canvas.restoreState()
-
-        doc = SimpleDocTemplate(
-            buf,
-            pagesize=LETTER,
-            leftMargin=40,
-            rightMargin=40,
-            topMargin=72,
-            bottomMargin=40
-        )
-        story = []
-        # Cover / Header
-        logo_path = Path('assets') / 'LSI_Logo.svg'
-        png_temp = None
-        try:
-            import cairosvg
-            if logo_path.exists():
-                tmpf = tempfile.NamedTemporaryFile(suffix='.png', delete=False)
-                cairosvg.svg2png(url=str(logo_path), write_to=tmpf.name, output_width=300)
-                png_temp = tmpf.name
-        except Exception:
-            png_temp = None
-        if png_temp and Path(png_temp).exists():
-            try:
-                story.append(Image(png_temp, width=220, height=66))
-                story.append(Spacer(1, 16))
-            except Exception:
-                pass
-        story.append(Paragraph(f'<para align="left"><font size=20><b>{title_text}</b></font></para>', styles['Normal']))
-        story.append(Spacer(1, 12))
-
-        # Extract summary text
-        if isinstance(summary_children, (list, tuple)):
-            summary_text = ' '.join(str(c) for c in summary_children if c)
-        else:
-            summary_text = str(summary_children)
-        if summary_text.strip():
-            story.append(Paragraph(summary_text, styles['BodyText']))
-            story.append(Spacer(1, 14))
-
-        # Derive high-level metrics from table_data
-        total_value = 0.0
-        building_totals = {}
-        for r in table_data:
-            try:
-                amt = float(r.get('Total') or 0)
-            except Exception:
-                amt = 0.0
-            total_value += amt
-            b = r.get('Building')
-            if b and b not in ('ALL',''):
-                building_totals.setdefault(b, 0.0)
-                building_totals[b] += amt
-        # Metadata table data
-        meta_rows = []
-        meta_rows.append(['Generated', datetime.now().strftime('%Y-%m-%d %H:%M')])
-        meta_rows.append(['Total Value', f"$ {total_value:,.2f}"])
-        if building_totals:
-            # Top 3 buildings (value desc)
-            for name, val in sorted(building_totals.items(), key=lambda x: x[1], reverse=True)[:3]:
-                meta_rows.append([f"Building: {name}", f"$ {val:,.2f}"])
-        meta_tbl = Table(meta_rows, hAlign='LEFT', colWidths=[130, 200])
-        meta_tbl.setStyle(TableStyle([
-            ('FONTNAME',(0,0),(-1,-1),'Helvetica'),
-            ('FONTSIZE',(0,0),(-1,-1),8),
-            ('BOTTOMPADDING',(0,0),(-1,-1),2),
-            ('TOPPADDING',(0,0),(-1,-1),1)
-        ]))
-        story.append(meta_tbl)
-        story.append(Spacer(1, 18))
-
-        # Detailed line items table with optional thumbnail column
-        # Preload sign images into map
-        image_map = {}
-        try:
-            conn = sqlite3.connect(DATABASE_PATH)
-            idf = pd.read_sql_query('SELECT name, image_path FROM sign_types WHERE image_path IS NOT NULL AND image_path<>""', conn)
-            conn.close()
-            for _, ir in idf.iterrows():
-                ip = ir['image_path']
-                if ip and Path(ip).exists():
-                    image_map[ir['name'].lower()] = Path(ip)
-        except Exception as e:
-            print(f"[pdf][thumb-preload][warn] {e}")
-        def make_thumb(path: Path):
-            try:
-                if path.suffix.lower()=='.svg':
-                    try:
-                        import cairosvg, tempfile as _tmp
-                        tmpf = _tmp.NamedTemporaryFile(suffix='.png', delete=False)
-                        cairosvg.svg2png(url=str(path), write_to=tmpf.name, output_width=120)
-                        return tmpf.name
-                    except Exception:
-                        return None
-                from PIL import Image as PILImage
-                import tempfile as _tmp
-                im = PILImage.open(path).convert('RGBA')
-                im.thumbnail((110,55))
-                tmpf = _tmp.NamedTemporaryFile(suffix='.png', delete=False)
-                im.save(tmpf.name, format='PNG')
-                return tmpf.name
-            except Exception:
-                return None
-        headers = ['Img','Building','Item','Material','Dimensions','Qty','Unit $','Line Total']
-        rows = [headers]
-        for r in table_data:
-            item = r.get('Item','')
-            base_item = item.split('Group:')[-1].strip() if item.startswith('Group:') else item
-            img_flow = ''
-            cand = base_item.lower()
-            thumb = image_map.get(cand)
-            if thumb:
-                tp = make_thumb(thumb)
-                if tp and Path(tp).exists():
-                    try:
-                        from reportlab.platypus import Image as RLImage
-                        img_flow = RLImage(tp, width=50, height=28, kind='proportional')
-                    except Exception:
-                        img_flow = ''
-            def fmt_money(v):
-                try:
-                    return f"$ {float(v):,.2f}" if str(v).strip()!='' else ''
-                except Exception:
-                    return str(v)
-            rows.append([
-                img_flow,
-                r.get('Building',''),
-                item,
-                r.get('Material',''),
-                r.get('Dimensions',''),
-                r.get('Quantity',''),
-                fmt_money(r.get('Unit_Price','')),
-                fmt_money(r.get('Total',''))
-            ])
-        detail_tbl = Table(rows, repeatRows=1, colWidths=[36,70,108,65,70,32,60,70])
-        detail_tbl.setStyle(TableStyle([
-            ('BACKGROUND',(0,0),(-1,0), colors.HexColor('#1f4e79')),
-            ('TEXTCOLOR',(0,0),(-1,0), colors.whitesmoke),
-            ('FONTNAME',(0,0),(-1,0),'Helvetica-Bold'),
-            ('FONTSIZE',(0,0),(-1,0),8),
-            ('ALIGN',(0,0),(-1,0),'LEFT'),
-            ('GRID',(0,0),(-1,-1),0.25, colors.HexColor('#b0b0b0')),
-            ('FONTSIZE',(0,1),(-1,-1),6.5),
-            ('VALIGN',(0,0),(-1,-1),'TOP'),
-            ('ROWBACKGROUNDS',(0,1),(-1,-1),[colors.whitesmoke, colors.Color(0.97,0.97,0.97)]),
-            ('ALIGN',(-2,1),(-1,-1),'RIGHT'),
-            ('RIGHTPADDING',(-2,0),(-1,-1),3),
-            ('LEFTPADDING',(0,0),(-1,-1),3),
-            ('TOPPADDING',(0,0),(-1,-1),2),
-            ('BOTTOMPADDING',(0,0),(-1,-1),2)
-        ]))
-        story.append(detail_tbl)
-        story.append(Spacer(1, 20))
-        story.append(Paragraph('<font size=8 color="#666666">Prepared using the internal Sign Estimation Tool. Figures are for estimation purposes only.</font>', styles['Normal']))
-
-        # Build the PDF and flush the buffer
-        doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
-        try:
-            buf.flush()
-        except Exception:
-            pass
-        buf.seek(0)
-        pdf_bytes = buf.read()
-        # Simple sanity check: PDF should start with %PDF and end with %%EOF (tolerate trailing whitespace)
-        valid = True
-        if not pdf_bytes.startswith(b'%PDF'):
-            valid = False
-        if b'%%EOF' not in pdf_bytes[-20:]:  # allow for small metadata trailer
-            # search last 1KB for EOF marker
-            tail = pdf_bytes[-1024:]
-            if b'%%EOF' not in tail:
-                valid = False
-        if not valid:
-            # Attempt fallback: write to temp for debugging and raise PreventUpdate
-            try:
-                with open('debug_failed_estimate.pdf','wb') as dbg:
-                    dbg.write(pdf_bytes)
-                print('[export-pdf][warn] PDF validation failed; wrote debug_failed_estimate.pdf')
-            except Exception:
-                pass
-            raise PreventUpdate
-        b64 = base64.b64encode(pdf_bytes).decode()
-        return dict(content=b64, filename='estimate.pdf', type='application/pdf')
+        def _extract_text(node):
+            # Handle Dash components (dict-like) extracting 'children'
+            if node is None:
+                return ''
+            # Dash components may appear as dict with 'props'
+            if isinstance(node, dict):
+                props = node.get('props') or {}
+                ch = props.get('children')
+                if isinstance(ch, (list, tuple)):
+                    return ' '.join(filter(None, (_extract_text(c) for c in ch)))
+                return _extract_text(ch)
+            # List/tuple of nodes
+            if isinstance(node, (list, tuple)):
+                return ' '.join(filter(None, (_extract_text(c) for c in node)))
+            # Primitive
+            return str(node)
+        summary_text = _extract_text(summary_children).strip()
+        # Collapse excessive whitespace
+        import re as _re
+        summary_text = _re.sub(r'\s+', ' ', summary_text)
+        from utils.pdf_export import generate_estimate_pdf
+        from dash import dcc
+        import os as _os
+        disable_logo = bool(_os.environ.get('ESTIMATE_PDF_DISABLE_LOGO'))
+        pdf_bytes, diag = generate_estimate_pdf(table_data, summary_text, pdf_title, str(DATABASE_PATH), disable_logo=disable_logo)
+        sig = diag.get('head_signature')
+        eof_present = diag.get('eof_present')
+        logo_diag = diag.get('logo', {})
+        print(f"[pdf][diag] size={diag.get('size')} sig={sig!r} eof={eof_present} sha1={diag.get('sha1')[:10]} rows={diag.get('row_count')} ext={diag.get('exterior_count')} int={diag.get('interior_count')} logo={logo_diag}")
+        if not (isinstance(sig, (bytes, bytearray)) and sig.startswith(b'%PDF') and eof_present):
+            print('[pdf][diag][warn] signature or EOF missing, raising for fallback')
+            raise ValueError('Generated PDF failed validation')
+        filename = (pdf_title.strip().replace(' ','_') if pdf_title else 'estimate') + '.pdf'
+        # Use binary-safe send_bytes to avoid any potential corruption on large files or special characters
+        return dcc.send_bytes(lambda buff: buff.write(pdf_bytes), filename)
     except Exception as e:
-        print(f"[export-pdf][error] {e}")
-        raise PreventUpdate
+        print(f'[export-pdf][error] {e}')
+        # Build a minimal fallback PDF with just error notice
+        try:
+            from reportlab.lib.pagesizes import LETTER
+            from reportlab.pdfgen import canvas
+            err_buf=io.BytesIO(); c=canvas.Canvas(err_buf, pagesize=LETTER)
+            c.setFont('Helvetica',12); c.drawString(72, LETTER[1]-100, 'Estimate PDF Generation Failed.')
+            c.setFont('Helvetica',10); c.drawString(72, LETTER[1]-120, f'Error: {str(e)[:140]}')
+            c.drawString(72, LETTER[1]-140, 'Please contact support or retry export.')
+            c.showPage(); c.save(); err_buf.seek(0)
+            from dash import dcc
+            fb_bytes = err_buf.read()
+            return dcc.send_bytes(lambda buff: buff.write(fb_bytes), 'estimate_error.pdf')
+        except Exception as ee:
+            print(f'[export-pdf][fallback-error] {ee}')
+            raise PreventUpdate
 
 # ------------------ Tree PNG Export ------------------ #
 @app.callback(
@@ -2546,7 +2564,18 @@ def export_tree_png(n_clicks, fig_dict):
     try:
         import plotly.graph_objects as go
         from PIL import Image as PILImage, ImageDraw, ImageFont
-        # Recreate figure
+        # Validate fig_dict structure
+        if not isinstance(fig_dict, dict) or 'data' not in fig_dict:
+            # Create error image
+            err_img = PILImage.new('RGB', (800, 200), 'white')
+            d = ImageDraw.Draw(err_img)
+            try:
+                f = ImageFont.truetype('Arial.ttf', 16)
+            except Exception:
+                f = ImageFont.load_default()
+            d.text((20, 40), 'Tree figure unavailable (invalid data).', fill='red', font=f)
+            b = io.BytesIO(); err_img.save(b, format='PNG'); b.seek(0)
+            return dict(content=base64.b64encode(b.read()).decode(), filename='project_tree_error.png', type='image/png')
         fig = go.Figure(fig_dict)
         try:
             base_png = fig.to_image(format='png', scale=2)
@@ -2620,7 +2649,13 @@ def export_tree_png(n_clicks, fig_dict):
         buff = io.BytesIO()
         out_img.convert('RGB').save(buff, format='PNG')
         buff.seek(0)
-        b64 = base64.b64encode(buff.read()).decode()
+        png_bytes = buff.read()
+        sig = png_bytes[:8]
+        valid_sig = sig == b'\x89PNG\r\n\x1a\n'
+        print(f"[png][diag] bytes={len(png_bytes)} sig={sig!r} valid_sig={valid_sig} sha1={__import__('hashlib').sha1(png_bytes).hexdigest()[:10]}")
+        if not valid_sig:
+            print('[png][diag][warn] PNG signature invalid; returning anyway for inspection')
+        b64 = base64.b64encode(png_bytes).decode()
         return dict(content=b64, filename='project_tree.png', type='image/png')
     except Exception as e:
         print(f"[export-tree-png][error] {e}")
@@ -3057,59 +3092,7 @@ def filter_signs_by_install(filter_value, master_rows):
         print(f"[filter_signs_by_install][error] {e}")
         return master_rows
 
-# ------------------ Sign Type Image Upload ------------------ #
-@app.callback(
-    Output('sign-image-upload-feedback','children'),
-    Output('signs-table-master-store','data', allow_duplicate=True),
-    Output('signs-table','data', allow_duplicate=True),
-    Output('sign-image-sign-dropdown','options', allow_duplicate=True),
-    Input('sign-image-upload','contents'),
-    State('sign-image-upload','filename'),
-    State('sign-image-sign-dropdown','value'),
-    State('signs-table-master-store','data'),
-    prevent_initial_call=True
-)
-def handle_sign_image_upload(contents, filename, sign_name, master_rows):
-    if not contents or not filename or not sign_name:
-        raise PreventUpdate
-    try:
-        header, b64data = contents.split(',',1)
-        raw = base64.b64decode(b64data)
-        # Determine image type
-        img_type = _detect_image_type(raw, filename)
-        if img_type not in ('png','jpg','jpeg','gif','svg'):
-            return dbc.Alert('Unsupported image format. Allowed: PNG/JPG/GIF/SVG', color='danger'), master_rows, master_rows, [{'label':r['name'],'value':r['name']} for r in (master_rows or [])]
-        ext = 'jpg' if img_type == 'jpeg' else img_type
-        images_dir = Path('sign_images')
-        images_dir.mkdir(exist_ok=True)
-        safe_base = ''.join(c for c in sign_name if c.isalnum() or c in ('-','_')).strip('_') or 'sign'
-        # Overwrite single canonical file per sign (simpler than uuid versions for now)
-        out_path = images_dir / f"{safe_base}.{ext}"
-        with open(out_path, 'wb') as f:
-            f.write(raw)
-        # Update DB (case-insensitive match on name)
-        try:
-            conn = sqlite3.connect(DATABASE_PATH)
-            cur = conn.cursor()
-            cur.execute("UPDATE sign_types SET image_path=?, last_modified=CURRENT_TIMESTAMP WHERE LOWER(name)=LOWER(?)", (str(out_path), sign_name))
-            conn.commit(); conn.close()
-        except Exception as dbe:
-            print(f"[sign-image][db][error] {dbe}")
-            return dbc.Alert(f"Image saved but DB update failed: {dbe}", color='warning'), master_rows, master_rows, [{'label':r['name'],'value':r['name']} for r in (master_rows or [])]
-        # Reload full sign types to update table + store
-        try:
-            conn = sqlite3.connect(DATABASE_PATH)
-            df = pd.read_sql_query("SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name", conn)
-            conn.close()
-            new_rows = df.to_dict('records')
-        except Exception as re:
-            print(f"[sign-image][reload][error] {re}")
-            new_rows = master_rows
-        options = [{'label':r['name'],'value':r['name']} for r in (new_rows or [])]
-        return dbc.Alert(f"Image attached to '{sign_name}'", color='success'), new_rows, new_rows, options
-    except Exception as e:
-        print(f"[sign-image][error] {e}")
-        return dbc.Alert(f"Upload failed: {e}", color='danger'), master_rows, master_rows, [{'label':r['name'],'value':r['name']} for r in (master_rows or [])]
+## Legacy single-image upload callback removed in favor of multi-image system above.
 
 # Serve uploaded sign images (simple static route)
 try:
