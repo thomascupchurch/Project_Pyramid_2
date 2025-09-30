@@ -329,6 +329,25 @@ Install these for full-feature export fidelity:
 | openpyxl  | Excel export (already required)                    |
 
 If missing, a dismissible yellow banner lists them; core app still functions with graceful fallbacks.
+
+#### Suppressing / Customizing Environment Banner
+
+Set `SIGN_APP_HIDE_ENV_NOTICE=1` to hide the yellow environment notice entirely if you are comfortable running without certain optional packages.
+
+PowerShell (current session only):
+```
+$env:SIGN_APP_HIDE_ENV_NOTICE=1; python app.py
+```
+macOS / Linux:
+```
+SIGN_APP_HIDE_ENV_NOTICE=1 ./start_app.sh
+```
+
+To ignore only specific missing modules (still show others), set:
+```
+SIGN_APP_IGNORE_MISSING=cairosvg,kaleido ./start_app.sh
+```
+The banner will then suppress those names from the missing list.
 ## 📊 Usage Guide
 
 ### Environment Variables

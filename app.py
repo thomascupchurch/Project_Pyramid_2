@@ -192,10 +192,8 @@ app.layout = html.Div([
         ], style={'display':'flex','alignItems':'center','gap':'6px'})
     ], color='dark', dark=True, className='mb-2 py-1'),
     dcc.Tabs(id='main-tabs', value='tab_projects', children=role_guarded_tabs('viewer')),
-    # Global interval to auto-refresh shared dropdown option sets (projects, profiles, templates, buildings)
-    # 5 minutes (300000 ms) by default; override via env SIGN_APP_DROPDOWN_REFRESH_MS
     dcc.Interval(id='global-dropdown-refresh', interval=int(os.getenv('SIGN_APP_DROPDOWN_REFRESH_MS','300000')), n_intervals=0),
-    html.Div(id='tab-content')
+    html.Div(id='role-tab-content')
 ])
 
 @app.callback(
@@ -205,13 +203,12 @@ app.layout = html.Div([
     prevent_initial_call=False
 )
 def update_role(role_value):
-    # Rebuild tabs each time role changes
     tabs = role_guarded_tabs(role_value)
     return role_value, tabs
 
 # Placeholder content callback (will integrate with existing tab rendering later)
 @app.callback(
-    Output('tab-content','children'),
+    Output('role-tab-content','children'),
     Input('main-tabs','value'),
     State('current-role','data')
 )
@@ -688,7 +685,6 @@ def toggle_note_include(n, note_id):
     Output('pp-default-id','options'),
     Output('template-id-item','options'),
     Output('apply-template-id','options'),
-    Output('apply-building-id','options'),
     Input('pp-create-btn','n_clicks'),
     Input('pp-refresh-btn','n_clicks'),
     Input('create-template-btn','n_clicks'),
@@ -710,14 +706,13 @@ def refresh_dropdown_options(_, __, ___, ____, _____, ______, template_order_mod
         else:
             cur.execute('SELECT id, name FROM bid_templates ORDER BY created_at DESC')
         templates = [{'label':r[1], 'value': r[0]} for r in cur.fetchall()]
-        cur.execute('SELECT id, name, project_id FROM buildings ORDER BY name')
-        buildings = [{'label':f"{r[1]} (P{r[2]})", 'value': r[0]} for r in cur.fetchall()]
+        # apply-template-id uses same templates list
         conn.close()
-        return projects, projects, profiles, profiles, templates, templates, buildings
+        return projects, projects, profiles, profiles, templates, templates
     except Exception as e:
         print(f"[dropdown-refresh][error] {e}")
         empty = []
-        return empty, empty, empty, empty, empty, empty, empty
+        return empty, empty, empty, empty, empty, empty
 
 # ------------------- Pricing Profiles Callbacks ------------------- #
 @app.callback(
@@ -3562,8 +3557,12 @@ def update_cyto_layout(spacing_factor, padding, label_width, node_size, toggle_l
     Input('env-banner-dismissed','data')
 )
 def diagnostics_banner(_active, dismissed):
+    # Allow complete suppression via env var
+    if os.getenv('SIGN_APP_HIDE_ENV_NOTICE','').lower() in ('1','true','yes'):
+        return ''
     if dismissed:
         return ''
+    ignore = {x.strip().lower() for x in os.getenv('SIGN_APP_IGNORE_MISSING','').split(',') if x.strip()}
     mods = [
         ('reportlab','PDF'),
         ('kaleido','PNG Export'),
@@ -3575,7 +3574,8 @@ def diagnostics_banner(_active, dismissed):
         try:
             __import__(name)
         except Exception:
-            missing.append(name)
+            if name.lower() not in ignore:
+                missing.append(name)
     if not missing:
         return ''
     return dbc.Alert([
@@ -3583,7 +3583,7 @@ def diagnostics_banner(_active, dismissed):
             html.Strong('Environment Notice: '),
             html.Span(f"Missing optional packages: {', '.join(missing)}. "),
             html.Span('Some export features may have reduced functionality. ', className='ms-1'),
-            html.Small('Run scripts/verify_env.py for full check.', className='text-muted'),
+            html.Small('Run scripts/verify_env.py for full check. Set SIGN_APP_HIDE_ENV_NOTICE=1 to suppress.', className='text-muted'),
             dbc.Button('×', id='close-env-banner', color='link', size='sm', className='p-0 ms-2', n_clicks=0, style={'textDecoration':'none','fontSize':'1.2rem','lineHeight':'1rem','float':'right'})
         ])
     ], color='warning', className='py-2 my-2 position-relative')
