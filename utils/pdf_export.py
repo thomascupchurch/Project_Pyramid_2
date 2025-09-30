@@ -8,6 +8,7 @@ diag is a dict containing size, sha1, row_count, exterior_count, interior_count,
 from __future__ import annotations
 
 import io
+import os
 import base64
 import hashlib
 from datetime import datetime
@@ -124,12 +125,17 @@ def generate_estimate_pdf(
     logo_diag = {"attempted": False, "found": False, "rendered": False, "error": None, "candidates": []}
     # Track whether any SVG was successfully rasterized (logo or other images)
     svg_rendered_any = False
-    candidates = [
+    # Allow an environment override for a custom logo path (e.g. network location)
+    env_logo = os.environ.get('SIGN_APP_LOGO_PATH')
+    candidates = []
+    if env_logo:
+        candidates.append(Path(env_logo))
+    candidates.extend([
         Path('assets') / 'LSI_Logo.svg',
         Path('LSI_Logo.svg'),
         Path('assets') / 'lsi_logo.svg',
         Path(__file__).resolve().parent.parent / 'assets' / 'LSI_Logo.svg'
-    ]
+    ])
     logo_diag['candidates'] = [str(p) for p in candidates]
     # prefer first existing
     chosen = None
@@ -152,14 +158,21 @@ def generate_estimate_pdf(
             except Exception:
                 cairosvg_available = False
             if chosen.suffix.lower() == '.svg' and cairosvg_available:
-                import cairosvg, tempfile as _tmp
-                tmpf = _tmp.NamedTemporaryFile(suffix='.png', delete=False)
-                cairosvg.svg2png(url=str(chosen), write_to=tmpf.name, output_width=300)
+                # Render SVG to PNG bytes directly (no temp file dependency) so that the
+                # embedded image persists even if temporary files are cleaned or locked.
+                import cairosvg
                 from reportlab.platypus import Image
-                story.append(Image(tmpf.name, width=220, height=66))
-                story.append(Spacer(1, 16))
-                logo_diag['rendered'] = True
-                svg_rendered_any = True
+                from reportlab.lib.utils import ImageReader
+                try:
+                    png_bytes = cairosvg.svg2png(url=str(chosen), output_width=300)
+                    img_reader = ImageReader(io.BytesIO(png_bytes))
+                    story.append(Image(img_reader, width=220, height=66))
+                    story.append(Spacer(1, 16))
+                    logo_diag['rendered'] = True
+                    svg_rendered_any = True
+                    logo_diag['in_memory'] = True
+                except Exception as _svg_e:
+                    logo_diag['error'] = f'svg_render_failed:{_svg_e!r}'
             elif chosen.suffix.lower() in ('.png', '.jpg', '.jpeg'):
                 from reportlab.platypus import Image
                 story.append(Image(str(chosen), width=220, height=66))
@@ -457,7 +470,8 @@ def generate_estimate_pdf(
         'interior_count': interior_count,
         'head_signature': pdf_bytes[:8],
         'eof_present': b'%%EOF' in pdf_bytes[-1024:],
-        'logo': logo_diag,
+    'logo': logo_diag,
+    'logo_source': str(chosen) if 'chosen' in locals() and chosen else None,
         'embed_images': bool(embed_images),
         'image_column': bool(embed_images),  # image column present when embed_images True
         'appendix_count': appendix_count,

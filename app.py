@@ -36,555 +36,115 @@ def _detect_image_type(raw: bytes, filename: str) -> str | None:
         return 'svg'
     return None
 
-# Add utils to path
-sys.path.append(str(Path(__file__).parent / "utils"))
+# ---------------- Application Initialization (restored after consolidation) ---------------- #
+from config import DATABASE_PATH as _BASE_DB_PATH, APP_HOST, APP_PORT, DASH_DEBUG, ensure_backup_dir, AUTO_BACKUP_INTERVAL_SEC, BACKUP_DIR, ONEDRIVE_SYNC_DIR, ONEDRIVE_AUTOSYNC_SEC  # type: ignore
+DATABASE_PATH = os.getenv("SIGN_APP_DB", _BASE_DB_PATH)
 
-# Import custom utilities (prefer explicit utils.* path)
+# Make utils importable
+sys.path.append(str(Path(__file__).parent / 'utils'))
 try:
     from utils.database import DatabaseManager  # type: ignore
     from utils.calculations import CostCalculator, compute_unit_price, compute_install_cost  # type: ignore
     from utils.onedrive import OneDriveManager  # type: ignore
-except ImportError as e:
-    print(f"Warning: Could not import utilities via utils.* path: {e}; attempting direct import fallback.")
-    try:
-        from database import DatabaseManager  # type: ignore
-        from calculations import CostCalculator, compute_unit_price, compute_install_cost  # type: ignore
-        from onedrive import OneDriveManager  # type: ignore
-    except Exception as ee:
-        print(f"Fallback import also failed: {ee}. Using minimal placeholder classes.")
-        class DatabaseManager:  # minimal fallback
-            def __init__(self, db_path): self.db_path = db_path
-            def init_database(self): pass
-            def get_project_estimate(self, project_id): return []
-        class CostCalculator:  # minimal fallback
-            def __init__(self, db_path): pass
-        def compute_unit_price(row_dict, price_mode):
-            try: return float(row_dict.get('unit_price') or 0)
-            except Exception: return 0.0
-        def compute_install_cost(*args, **kwargs): return 0.0
-        class OneDriveManager:  # minimal fallback
-            def __init__(self, local_path): pass
+except Exception as e:  # Fallback minimal stubs to keep module importable
+    print(f"[startup][warn] Failed importing utils modules: {e}")
+    class DatabaseManager:  # type: ignore
+        def __init__(self, db_path): self.db_path = db_path
+        def init_database(self): pass
+        def create_pricing_profile(self,*a,**kw): return 0
+        def assign_pricing_profile_to_project(self,*a,**kw): return None
+        def add_note(self,*a,**kw): return None
+        def list_notes(self,*a,**kw): return []
+    class CostCalculator:  # type: ignore
+        def __init__(self, db_path): pass
+    def compute_unit_price(row_dict, price_mode): return float(row_dict.get('unit_price') or 0)
+    def compute_install_cost(*a,**kw): return 0.0
+    class OneDriveManager:  # type: ignore
+        def __init__(self, local_path): pass
+        def sync_database(self): return False, 'onedrive disabled'
 
-# Initialize Dash app
-print("[startup] Import phase complete. Initializing Dash app...", flush=True)
-app = dash.Dash(
-    __name__,
-    external_stylesheets=[dbc.themes.BOOTSTRAP],
-    suppress_callback_exceptions=True
-)
-app.title = "Sign Estimation Tool"
-
-from config import DATABASE_PATH, APP_HOST, APP_PORT, DASH_DEBUG, ensure_backup_dir, AUTO_BACKUP_INTERVAL_SEC, BACKUP_DIR, ONEDRIVE_SYNC_DIR, ONEDRIVE_AUTOSYNC_SEC
-DATABASE_PATH = os.getenv("SIGN_APP_DB", DATABASE_PATH)
-print(f"[startup] Database path resolved to: {DATABASE_PATH}", flush=True)
-db_manager = None
-try:
-    print("[startup] Creating DatabaseManager...", flush=True)
-    db_manager = DatabaseManager(DATABASE_PATH)
-    print("[startup] DatabaseManager created.", flush=True)
-except Exception as e:
-    print(f"[startup][error] Failed to create DatabaseManager: {e}", flush=True)
-    raise
-
-print("[startup] Creating CostCalculator...", flush=True)
-cost_calculator = CostCalculator(DATABASE_PATH)
-print("[startup] CostCalculator ready.", flush=True)
-print("[startup] Creating OneDriveManager...", flush=True)
-onedrive_manager = OneDriveManager(Path.cwd())
-print("[startup] OneDriveManager ready.", flush=True)
-
-# Optional: configure OneDrive target path if env var provided
-if ONEDRIVE_SYNC_DIR:
-    try:
-        onedrive_manager.setup_onedrive_path(ONEDRIVE_SYNC_DIR)
-        print(f"[startup] OneDrive sync dir set to {ONEDRIVE_SYNC_DIR}")
-    except Exception as e:
-        print(f"[startup][warn] Failed to set OneDrive path: {e}")
-
-print("[startup] Ensuring database schema...", flush=True)
+db_manager = DatabaseManager(DATABASE_PATH)
 try:
     db_manager.init_database()
-    print("[startup] Schema ensured.", flush=True)
 except Exception as e:
-    print(f"[startup][error] init_database failed: {e}", flush=True)
-    raise
+    print(f"[startup][error] init_database: {e}")
+cost_calculator = CostCalculator(DATABASE_PATH)
+onedrive_manager = OneDriveManager(Path.cwd())
 
-# --- Lightweight runtime migration for extended columns --- #
 def ensure_extended_schema():
-    """Add newly used columns to tables if they do not yet exist.
-
-    Safe to run at startup; uses PRAGMA table_info inspection then ALTER TABLE for any missing columns.
-    """
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
-        cur = conn.cursor()
-        # sign_types extended columns
-        cur.execute("PRAGMA table_info('sign_types')")
-        existing_cols = {r[1] for r in cur.fetchall()}
-        alter_statements = []
-        if 'material_alt' not in existing_cols:
-            alter_statements.append("ALTER TABLE sign_types ADD COLUMN material_alt TEXT")
-        if 'material_multiplier' not in existing_cols:
-            alter_statements.append("ALTER TABLE sign_types ADD COLUMN material_multiplier REAL DEFAULT 0")
-        if 'install_type' not in existing_cols:
-            alter_statements.append("ALTER TABLE sign_types ADD COLUMN install_type TEXT")
-        if 'install_time_hours' not in existing_cols:
-            alter_statements.append("ALTER TABLE sign_types ADD COLUMN install_time_hours REAL DEFAULT 0")
-        if 'per_sign_install_rate' not in existing_cols:
-            alter_statements.append("ALTER TABLE sign_types ADD COLUMN per_sign_install_rate REAL DEFAULT 0")
-        # building_signs optional custom_price
-        cur.execute("PRAGMA table_info('building_signs')")
-        bs_cols = {r[1] for r in cur.fetchall()}
-        if 'custom_price' not in bs_cols:
-            alter_statements.append("ALTER TABLE building_signs ADD COLUMN custom_price REAL")
-        for stmt in alter_statements:
-            try:
-                cur.execute(stmt)
-                print(f"[migrate] Executed: {stmt}")
-            except Exception as ie:
-                # Ignore if race or platform restriction
-                print(f"[migrate][warn] {ie} while executing {stmt}")
+        conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+        cur.execute("PRAGMA table_info('sign_types')"); cols = {r[1] for r in cur.fetchall()}
+        if 'material_alt' not in cols:
+            try: cur.execute("ALTER TABLE sign_types ADD COLUMN material_alt TEXT")
+            except Exception: pass
+        if 'material_multiplier' not in cols:
+            try: cur.execute("ALTER TABLE sign_types ADD COLUMN material_multiplier REAL DEFAULT 0")
+            except Exception: pass
+        if 'install_type' not in cols:
+            try: cur.execute("ALTER TABLE sign_types ADD COLUMN install_type TEXT")
+            except Exception: pass
+        if 'install_time_hours' not in cols:
+            try: cur.execute("ALTER TABLE sign_types ADD COLUMN install_time_hours REAL DEFAULT 0")
+            except Exception: pass
+        if 'per_sign_install_rate' not in cols:
+            try: cur.execute("ALTER TABLE sign_types ADD COLUMN per_sign_install_rate REAL DEFAULT 0")
+            except Exception: pass
+        cur.execute("PRAGMA table_info('building_signs')"); bcols = {r[1] for r in cur.fetchall()}
+        if 'custom_price' not in bcols:
+            try: cur.execute("ALTER TABLE building_signs ADD COLUMN custom_price REAL")
+            except Exception: pass
         conn.commit(); conn.close()
     except Exception as e:
-        print(f"[migrate][error] {e}")
+        print(f"[schema][warn] {e}")
 
 ensure_extended_schema()
 
-# ---------------- Role-Based UI Skeleton -----------------
-# Store currently selected role in dcc.Store; simple dropdown for now.
+# Dash app
+app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
+app.title = "Sign Estimation Tool"
+
+# Runtime cross-platform interpreter path sanity check
+def _interpreter_sanity():
+    bad_markers = ['/Users/', '/miniconda3/', '/bin/python']
+    # Some libs set PYTHONEXECUTABLE (PyInstaller, etc.)
+    suspect = os.environ.get('PYTHONEXECUTABLE') or os.environ.get('PYTHON_EXECUTABLE')
+    if suspect and os.name == 'nt':
+        lower = suspect.replace('\\','/').lower()
+        if any(m in lower for m in ['/users/', '/miniconda3/']):
+            print(f"[startup][warn] Ignoring non-Windows interpreter reference: {suspect}")
+    # Defensive: ensure sys.executable exists
+    if not os.path.exists(sys.executable):
+        print(f"[startup][warn] sys.executable missing ({sys.executable}); continuing but environment may be broken.")
+
+_interpreter_sanity()
+
+# Consolidated role/tab globals
 ROLE_OPTIONS = [
     {'label': 'Admin', 'value': 'admin'},
     {'label': 'Estimator', 'value': 'estimator'},
     {'label': 'Sales', 'value': 'sales'},
     {'label': 'Viewer', 'value': 'viewer'}
 ]
+ROLE_RANK = {'admin':4,'estimator':3,'sales':2,'viewer':1}
+TAB_DEFS = [
+    ('projects-tab','Projects','viewer'),
+    ('signs-tab','Sign Types','estimator'),
+    ('groups-tab','Sign Groups','estimator'),
+    ('building-tab','Building View','viewer'),
+    ('estimates-tab','Estimates','viewer'),
+    ('import-tab','Import Data','viewer'),
+    ('tab_profiles','Pricing Profiles','admin'),
+    ('tab_snapshots','Snapshots','estimator'),
+    ('tab_templates','Bid Templates','estimator'),
+    ('tab_tags','Tags','estimator'),
+    ('tab_notes','Notes','estimator')
+]
+def build_tabs_for_role(role: str):
+    rank = ROLE_RANK.get(role or 'viewer',1)
+    return [dbc.Tab(label=lbl, tab_id=tid) for tid,lbl,min_role in TAB_DEFS if ROLE_RANK.get(min_role,1) <= rank]
 
-def role_guarded_tabs(selected_role: str):
-    """Return list of tabs based on role (placeholder filtering)."""
-    # Define all tabs (id, label, role_min)
-    base_tabs = [
-        ('tab_projects', 'Projects', 'viewer'),
-        ('tab_sign_types', 'Sign Types', 'estimator'),
-        ('tab_groups', 'Sign Groups', 'estimator'),
-        ('tab_estimates', 'Estimates', 'viewer'),
-        ('tab_export', 'Exports', 'viewer'),
-        ('tab_admin', 'Admin', 'admin'),
-        ('tab_profiles', 'Pricing Profiles', 'admin'),
-        ('tab_snapshots', 'Snapshots', 'estimator'),
-        ('tab_templates', 'Bid Templates', 'estimator'),
-        ('tab_tags', 'Tags', 'estimator'),
-        ('tab_notes', 'Notes', 'estimator'),
-    ]
-    order = {'admin':4, 'estimator':3, 'sales':2, 'viewer':1}
-    srank = order.get((selected_role or 'viewer'), 1)
-    out = []
-    for tid, label, min_role in base_tabs:
-        if order.get(min_role, 1) <= srank:
-            out.append(dcc.Tab(label=label, value=tid))
-    return out or [dcc.Tab(label='Projects', value='tab_projects')]
-
-app.layout = html.Div([
-    dcc.Store(id='current-role', storage_type='session'),
-    dbc.Navbar([
-        html.Div([
-            html.Span('Role:', className='me-2'),
-            dcc.Dropdown(id='role-selector', options=ROLE_OPTIONS, value='viewer', clearable=False, style={'width':'170px', 'fontSize':'12px'})
-        ], style={'display':'flex','alignItems':'center','gap':'6px'})
-    ], color='dark', dark=True, className='mb-2 py-1'),
-    dcc.Tabs(id='main-tabs', value='tab_projects', children=role_guarded_tabs('viewer')),
-    dcc.Interval(id='global-dropdown-refresh', interval=int(os.getenv('SIGN_APP_DROPDOWN_REFRESH_MS','300000')), n_intervals=0),
-    html.Div(id='role-tab-content')
-])
-
-@app.callback(
-    Output('current-role','data'),
-    Output('main-tabs','children'),
-    Input('role-selector','value'),
-    prevent_initial_call=False
-)
-def update_role(role_value):
-    tabs = role_guarded_tabs(role_value)
-    return role_value, tabs
-
-# Placeholder content callback (will integrate with existing tab rendering later)
-@app.callback(
-    Output('role-tab-content','children'),
-    Input('main-tabs','value'),
-    State('current-role','data')
-)
-def render_tab(active_tab, role):
-    # Minimal management UIs for new backend features (snapshots, templates, tags)
-    if active_tab == 'tab_snapshots':
-        return html.Div([
-            html.H4('Estimate Snapshots'),
-            html.Div([
-                dbc.Row([
-                    dbc.Col([
-                        dbc.Label('Project'),
-                        dcc.Dropdown(id='snap-project-id', placeholder='Select project')
-                    ], md=3),
-                    dbc.Col([
-                        dbc.Label('Label (optional)'),
-                        dbc.Input(id='snap-label', placeholder='Snapshot label')
-                    ], md=3),
-                    dbc.Col([
-                        dbc.Button('Create Snapshot', id='create-snapshot-btn', color='primary', className='mt-4 w-100')
-                    ], md=2),
-                    dbc.Col([
-                        dbc.Button('Refresh List', id='refresh-snapshots-btn', color='secondary', className='mt-4 w-100')
-                    ], md=2)
-                ], className='g-2'),
-                html.Div(id='snapshot-create-feedback', className='mt-2')
-            ]),
-            html.Hr(),
-            dbc.Row([
-                dbc.Col([
-                    html.H5('Snapshots'),
-                    dash_table.DataTable(
-                        id='snapshots-table',
-                        columns=[
-                            {'name':'ID','id':'id'},
-                            {'name':'Label','id':'label'},
-                            {'name':'Hash','id':'snapshot_hash'},
-                            {'name':'Created','id':'created_at'}
-                        ], data=[], page_size=8, style_table={'overflowX':'auto'}
-                    )
-                ], md=6),
-                dbc.Col([
-                    html.H5('Diff'),
-                    dbc.Row([
-                        dbc.Col([
-                            dbc.Label('Snapshot A'),
-                            dbc.Input(id='diff-snap-a', type='number')
-                        ], md=3),
-                        dbc.Col([
-                            dbc.Label('Snapshot B'),
-                            dbc.Input(id='diff-snap-b', type='number')
-                        ], md=3),
-                        dbc.Col([
-                            dbc.Button('Run Diff', id='run-diff-btn', color='info', className='mt-4 w-100')
-                        ], md=2)
-                    ], className='g-2'),
-                    html.Pre(id='snapshot-diff-output', style={'maxHeight':'300px','overflowY':'auto','background':'#f8f9fa','padding':'8px','fontSize':'12px'})
-                ], md=6)
-            ])
-        ], style={'padding':'16px'})
-    if active_tab == 'tab_templates':
-        return html.Div([
-            html.H4('Bid Templates'),
-            dbc.Row([
-                dbc.Col([
-                    dbc.Label('Ordering'),
-                    dcc.RadioItems(id='template-order-mode', options=[
-                        {'label':'Newest','value':'new'}, {'label':'A→Z','value':'alpha'}
-                    ], value='new', inline=True, className='small')
-                ], md=3)
-            ], className='g-2 mb-1'),
-            dbc.Row([
-                dbc.Col([dbc.Label('Template Name'), dbc.Input(id='template-name', placeholder='Template name')], md=3),
-                dbc.Col([dbc.Label('Description'), dbc.Input(id='template-desc', placeholder='Description')], md=4),
-                dbc.Col(dbc.Button('Create Template', id='create-template-btn', color='primary', className='mt-4 w-100'), md=2),
-                dbc.Col(dbc.Button('Refresh', id='refresh-templates-btn', color='secondary', className='mt-4 w-100'), md=2)
-            ], className='g-2'),
-            html.Div(id='template-create-feedback', className='mt-2'),
-            html.Hr(),
-            dbc.Row([
-                dbc.Col([
-                    html.H5('Templates'),
-                    dash_table.DataTable(id='templates-table', columns=[
-                        {'name':'ID','id':'id'}, {'name':'Name','id':'name'}, {'name':'Description','id':'description'}, {'name':'Created','id':'created_at'}
-                    ], data=[], page_size=8, style_table={'overflowX':'auto'})
-                ], md=5),
-                dbc.Col([
-                    html.H5('Add Item to Template'),
-                    dbc.Row([
-                        dbc.Col([dbc.Label('Template'), dcc.Dropdown(id='template-id-item', placeholder='Select template')], md=3),
-                        dbc.Col([dbc.Label('Sign Type Name'), dbc.Input(id='template-sign-name', placeholder='Sign type name')], md=5),
-                        dbc.Col([dbc.Label('Qty'), dbc.Input(id='template-sign-qty', type='number', value=1)], md=2),
-                        dbc.Col(dbc.Button('Add Item', id='add-template-item-btn', color='success', className='mt-4 w-100'), md=2)
-                    ], className='g-2'),
-                    html.Div(id='template-item-feedback', className='mt-2'),
-                    html.Hr(),
-                    html.H5('Apply Template to Building'),
-                    dbc.Row([
-                        dbc.Col([dbc.Label('Template'), dcc.Dropdown(id='apply-template-id', placeholder='Template')], md=3),
-                        dbc.Col([dbc.Label('Building'), dcc.Dropdown(id='apply-building-id', placeholder='Building')], md=3),
-                        dbc.Col(dbc.Button('Apply', id='apply-template-btn', color='info', className='mt-4 w-100'), md=2)
-                    ], className='g-2'),
-                    html.Div(id='apply-template-feedback', className='mt-2')
-                ], md=7)
-            ])
-        ], style={'padding':'16px'})
-    if active_tab == 'tab_tags':
-        return html.Div([
-            html.H4('Sign Type Tags'),
-            dbc.Row([
-                dbc.Col([dbc.Label('Sign Type Name'), dbc.Input(id='tag-sign-type', placeholder='Sign type name')], md=4),
-                dbc.Col([dbc.Label('Tag'), dbc.Input(id='tag-name', placeholder='Tag name')], md=3),
-                dbc.Col(dbc.Button('Add Tag', id='add-tag-btn', color='primary', className='mt-4 w-100'), md=2),
-                dbc.Col(dbc.Button('List Tags', id='list-tags-btn', color='secondary', className='mt-4 w-100'), md=2)
-            ], className='g-2'),
-            html.Div(id='tag-feedback', className='mt-2'),
-            html.Pre(id='tag-list-output', style={'background':'#f8f9fa','padding':'8px','maxHeight':'260px','overflowY':'auto','fontSize':'12px'})
-        ], style={'padding':'16px'})
-    if active_tab == 'tab_profiles':
-        return html.Div([
-            html.H4('Pricing Profiles'),
-            dbc.Row([
-                dbc.Col([dbc.Label('Profile Name'), dbc.Input(id='pp-name', placeholder='Profile name')], md=3),
-                dbc.Col([
-                    dbc.Label('Sales Tax Rate (%)'),
-                    dbc.Input(id='pp-tax', type='number', value=0),
-                    html.Small('Percent applied to taxable subtotal. Example: 7.5 = 7.5% tax.', className='text-muted d-block')
-                ], md=2),
-                dbc.Col([
-                    dbc.Label('Installation Rate (%)'),
-                    dbc.Input(id='pp-install', type='number', value=0),
-                    html.Small('Percent of (subtotal) added as install when using percent install mode.', className='text-muted d-block')
-                ], md=2),
-                dbc.Col([
-                    dbc.Label('Margin Multiplier'),
-                    dbc.Input(id='pp-margin', type='number', value=1.0, step=0.01),
-                    html.Small('Applied after base cost: final = subtotal * margin. 1.20 = 20% margin uplift.', className='text-muted d-block')
-                ], md=2),
-                dbc.Col(dbc.Checklist(id='pp-default', options=[{'label':'Default','value':'d'}], value=[], className='mt-4'), md=1),
-                dbc.Col(dbc.Button('Create Profile', id='pp-create-btn', color='primary', className='mt-4 w-100'), md=2)
-            ], className='g-2'),
-            html.Div(id='pp-create-feedback', className='mt-2'),
-            html.Hr(),
-            dbc.Row([
-                dbc.Col([
-                    html.H5('Profiles'),
-                    dash_table.DataTable(id='pp-table', columns=[
-                        {'name':'ID','id':'id'}, {'name':'Name','id':'name'}, {'name':'Sales Tax','id':'sales_tax_rate'},
-                        {'name':'Install Rate','id':'installation_rate'}, {'name':'Margin Mult','id':'margin_multiplier'}, {'name':'Default','id':'is_default'}
-                    ], data=[], page_size=8, style_table={'overflowX':'auto'})
-                ], md=6),
-                dbc.Col([
-                    html.H5('Assign to Project'),
-                    dbc.Row([
-                        dbc.Col([dbc.Label('Project'), dcc.Dropdown(id='pp-project-id', placeholder='Select project')], md=4),
-                        dbc.Col([dbc.Label('Profile'), dcc.Dropdown(id='pp-profile-id', placeholder='Select profile')], md=4),
-                        dbc.Col(dbc.Button('Assign', id='pp-assign-btn', color='info', className='mt-4 w-100'), md=4)
-                    ], className='g-2'),
-                    html.Div(id='pp-assign-feedback', className='mt-2'),
-                    html.Hr(),
-                    html.H5('Set Default'),
-                    dbc.Row([
-                        dbc.Col([dbc.Label('Profile'), dcc.Dropdown(id='pp-default-id', placeholder='Select profile')], md=5),
-                        dbc.Col(dbc.Button('Make Default', id='pp-make-default-btn', color='secondary', className='mt-4 w-100'), md=5)
-                    ], className='g-2'),
-                    html.Div(id='pp-default-feedback', className='mt-2'),
-                    html.Hr(),
-                    dbc.Button('Refresh Profiles', id='pp-refresh-btn', color='secondary', className='mt-2')
-                ], md=6)
-            ])
-        ], style={'padding':'16px'})
-    if active_tab == 'tab_notes':
-        return html.Div([
-            html.H4('Notes'),
-            dbc.Row([
-                dbc.Col([dbc.Label('Entity Type'), dcc.Dropdown(id='note-entity-type', options=[
-                    {'label':'Project','value':'project'}, {'label':'Building','value':'building'}, {'label':'Sign Type','value':'sign_type'}
-                ], value='project', clearable=False, style={'width':'160px'})], md=2),
-                dbc.Col([dbc.Label('Entity ID / Name'), dbc.Input(id='note-entity-id', placeholder='ID (project/building) or name (sign)')], md=3),
-                dbc.Col([dbc.Label('Note Text'), dbc.Input(id='note-text', placeholder='Enter note')], md=4),
-                dbc.Col(dbc.Checklist(id='note-include', options=[{'label':'Include in Export','value':'inc'}], value=['inc'], className='mt-4'), md=2),
-                dbc.Col(dbc.Button('Add Note', id='add-note-btn', color='primary', className='mt-4 w-100'), md=1)
-            ], className='g-2'),
-            html.Div(id='note-add-feedback', className='mt-2'),
-            html.Hr(),
-            dbc.Row([
-                dbc.Col([
-                    html.H5('Load Notes'),
-                    dbc.Row([
-                        dbc.Col([dbc.Label('Entity Type'), dcc.Dropdown(id='list-note-entity-type', options=[
-                            {'label':'Project','value':'project'}, {'label':'Building','value':'building'}, {'label':'Sign Type','value':'sign_type'}
-                        ], value='project', clearable=False, style={'width':'160px'})], md=3),
-                        dbc.Col([dbc.Label('Entity ID / Name'), dbc.Input(id='list-note-entity-id', placeholder='ID or name')], md=3),
-                        dbc.Col(dbc.Button('Load Notes', id='load-notes-btn', color='secondary', className='mt-4 w-100'), md=2)
-                    ], className='g-2'),
-                    dash_table.DataTable(id='notes-table', columns=[
-                        {'name':'ID','id':'id'}, {'name':'Note','id':'note'}, {'name':'Include','id':'include_in_export'}, {'name':'Created','id':'created_at'}
-                    ], data=[], page_size=10, style_table={'overflowX':'auto'})
-                ], md=7),
-                dbc.Col([
-                    html.H5('Toggle Include Flag'),
-                    dbc.Row([
-                        dbc.Col([dbc.Label('Note ID'), dbc.Input(id='toggle-note-id', type='number')], md=5),
-                        dbc.Col(dbc.Button('Toggle', id='toggle-note-btn', color='info', className='mt-4 w-100'), md=5)
-                    ], className='g-2'),
-                    html.Div(id='toggle-note-feedback', className='mt-2')
-                ], md=5)
-            ])
-        ], style={'padding':'16px'})
-    return html.Div([
-        html.H5(f"Placeholder for {active_tab} (role={role})"),
-        html.P("Role-based UI skeleton active. Existing detailed layout integration pending.")
-    ], style={'padding':'16px'})
-
-# ------------------- Snapshot Callbacks ------------------- #
-@app.callback(
-    Output('snapshot-create-feedback','children'),
-    Output('snapshots-table','data'),
-    Input('create-snapshot-btn','n_clicks'),
-    Input('refresh-snapshots-btn','n_clicks'),
-    State('snap-project-id','value'),
-    State('snap-label','value'),
-    prevent_initial_call=True
-)
-def handle_snapshots(create_clicks, refresh_clicks, project_id, label):
-    triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
-    if not triggered:
-        raise PreventUpdate
-    if not project_id:
-        return dbc.Alert('Project ID required', color='danger'), []
-    msg = dash.no_update
-    if 'create-snapshot-btn' in triggered:
-        ok, sid_or_msg = db_manager.create_estimate_snapshot(int(project_id), label)
-        if ok:
-            msg = dbc.Alert(f'Snapshot created (ID {sid_or_msg})', color='success', dismissable=True)
-        else:
-            msg = dbc.Alert(f'Error: {sid_or_msg}', color='danger')
-    snaps = db_manager.list_estimate_snapshots(int(project_id))
-    data = [{'id':r[0],'label':r[1] or '', 'snapshot_hash':r[2], 'created_at':r[3]} for r in snaps]
-    return msg, data
-
-@app.callback(
-    Output('snapshot-diff-output','children'),
-    Input('run-diff-btn','n_clicks'),
-    State('diff-snap-a','value'),
-    State('diff-snap-b','value'),
-    prevent_initial_call=True
-)
-def run_snapshot_diff(n, a, b):
-    if not n:
-        raise PreventUpdate
-    if not (a and b):
-        return 'Provide snapshot A and B IDs.'
-    diff = db_manager.diff_snapshots(int(a), int(b))
-    if diff is None:
-        return 'One or both snapshots not found.'
-    import json as _json
-    return _json.dumps(diff, indent=2)[:8000]
-
-# ------------------- Templates Callbacks ------------------- #
-@app.callback(
-    Output('template-create-feedback','children'),
-    Output('templates-table','data'),
-    Input('create-template-btn','n_clicks'),
-    Input('refresh-templates-btn','n_clicks'),
-    State('template-name','value'),
-    State('template-desc','value'),
-    prevent_initial_call=True
-)
-def handle_templates(create_clicks, refresh_clicks, name, desc):
-    triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
-    if not triggered:
-        raise PreventUpdate
-    msg = dash.no_update
-    if 'create-template-btn' in triggered:
-        if not name:
-            return dbc.Alert('Template name required', color='danger'), dash.no_update
-        try:
-            tid = db_manager.create_bid_template(name.strip(), desc or '')
-            msg = dbc.Alert(f'Template created (ID {tid})', color='success', dismissable=True)
-        except Exception as e:
-            msg = dbc.Alert(f'Error: {e}', color='danger')
-    # load templates
-    conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
-    cur.execute('SELECT id, name, description, created_at FROM bid_templates ORDER BY created_at DESC')
-    rows = [{'id':r[0],'name':r[1],'description':r[2] or '','created_at':r[3]} for r in cur.fetchall()]
-    conn.close()
-    return msg, rows
-
-@app.callback(
-    Output('template-item-feedback','children'),
-    Input('add-template-item-btn','n_clicks'),
-    State('template-id-item','value'),
-    State('template-sign-name','value'),
-    State('template-sign-qty','value'),
-    prevent_initial_call=True
-)
-def add_template_item(n, template_id, sign_name, qty):
-    if not n:
-        raise PreventUpdate
-    if not (template_id and sign_name):
-        return dbc.Alert('Template ID and sign name required', color='danger')
-    ok, msg = db_manager.add_item_to_template(int(template_id), sign_name.strip(), int(qty or 1))
-    color = 'success' if ok else 'danger'
-    return dbc.Alert(msg, color=color, dismissable=True)
-
-@app.callback(
-    Output('apply-template-feedback','children'),
-    Input('apply-template-btn','n_clicks'),
-    State('apply-template-id','value'),
-    State('apply-building-id','value'),
-    prevent_initial_call=True
-)
-def apply_template(n, template_id, building_id):
-    if not n:
-        raise PreventUpdate
-    if not (template_id and building_id):
-        return dbc.Alert('Template ID and Building ID required', color='danger')
-    try:
-        count = db_manager.apply_template_to_building(int(template_id), int(building_id))
-        return dbc.Alert(f'Applied {count} item(s) to building', color='success', dismissable=True)
-    except Exception as e:
-        return dbc.Alert(f'Error: {e}', color='danger')
-
-# --------------- Dependent Building Options (Template Apply) --------------- #
-@app.callback(
-    Output('apply-building-id','options'),
-    Output('apply-building-id','disabled'),
-    Input('apply-project-id','value'),
-    Input('global-dropdown-refresh','n_intervals'),
-    prevent_initial_call=False
-)
-def filter_buildings_for_apply(project_id, _):
-    try:
-        if not project_id:
-            return [], True
-        conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
-        cur.execute('SELECT id, name FROM buildings WHERE project_id=? ORDER BY name', (int(project_id),))
-        opts = [{'label': r[1], 'value': r[0]} for r in cur.fetchall()]
-        conn.close()
-        return opts, False
-    except Exception as e:
-        print(f"[apply-building-filter][error] {e}")
-        return [], True
-
-# ------------------- Tags Callbacks ------------------- #
-@app.callback(
-    Output('tag-feedback','children'),
-    Input('add-tag-btn','n_clicks'),
-    State('tag-sign-type','value'),
-    State('tag-name','value'),
-    prevent_initial_call=True
-)
-def add_tag(n, sign_type_name, tag_name):
-    if not n:
-        raise PreventUpdate
-    if not (sign_type_name and tag_name):
-        return dbc.Alert('Sign type and tag required', color='danger')
-    ok, msg = db_manager.tag_sign_type(sign_type_name.strip(), tag_name.strip())
-    return dbc.Alert(msg, color='success' if ok else 'danger', dismissable=True)
-
-@app.callback(
-    Output('tag-list-output','children'),
-    Input('list-tags-btn','n_clicks'),
-    State('tag-sign-type','value'),
-    prevent_initial_call=True
-)
-def list_tags(n, sign_type_name):
-    if not n:
-        raise PreventUpdate
-    if not sign_type_name:
-        return 'Provide a sign type name.'
-    tags = db_manager.list_tags_for_sign_type(sign_type_name.strip())
-    return '\n'.join(tags) if tags else '(no tags)'
-
-# ------------------- Notes Callbacks ------------------- #
+# Add utils to path
 @app.callback(
     Output('note-add-feedback','children'),
     Input('add-note-btn','n_clicks'),
@@ -858,318 +418,81 @@ def _attempt_import_book2():
             material = r.get('Material2') or r.get('Material') or ''
             # Derive price_per_sq_ft from 'Unnamed: 24' if numeric else material_multiplier
             ppsf_raw = r.get('Unnamed: 24') or r.get('material_multiplier') or 0
-            try: ppsf = float(str(ppsf_raw).replace('$','').replace(',','')) if ppsf_raw not in (None,'') else 0.0
-            except: ppsf = 0.0
-            # Unit price attempt: item_cost if present else (width*height*ppsf)
-            unit_price = parse_cost(r.get('item_cost'))
+            # compute derived fields (example heuristic)
             try:
-                if unit_price == 0 and width and height and ppsf:
-                    unit_price = float(width) * float(height) * float(ppsf)
-            except: pass
-            records.append((name[:120], str(r.get('Desc') or r.get('full_name') or '')[:255], unit_price, str(material)[:120], ppsf, float(width or 0), float(height or 0)))
-        conn = sqlite3.connect(DATABASE_PATH)
-        cur = conn.cursor()
-        cur.executemany('''
-            INSERT INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height)
-            VALUES (?,?,?,?,?,?,?)
-            ON CONFLICT(name) DO UPDATE SET description=excluded.description,
-                unit_price=excluded.unit_price, material=excluded.material,
-                price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height
-        ''', records)
-        conn.commit()
-        conn.close()
-        print(f'[startup] Imported/merged {len(records)} sign types from Book2.csv')
+                ppsf = float(str(ppsf_raw).replace('$','').replace(',','')) if ppsf_raw not in (None,'') else 0.0
+            except Exception:
+                ppsf = 0.0
+            records.append((name[:120], '', 0.0, material[:120], ppsf, float(width or 0), float(height or 0)))
+        if records:
+            conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+            cur.executemany('''INSERT OR IGNORE INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height) VALUES (?,?,?,?,?,?,?)''', records)
+            conn.commit(); conn.close()
+            print(f"[startup] Imported {len(records)} records from Book2.csv")
     except Exception as e:
-        print(f'[startup][warn] Book2.csv import skipped: {e}')
-
-_attempt_import_book2()
-
-# (Removed duplicate inline schema function; schema managed by utils/database.py)
-
-def load_csv_data(file_path):
-    """Load initial data from CSV file."""
-    try:
-        df = pd.read_csv(file_path)
-        conn = sqlite3.connect(DATABASE_PATH)
-        
-        # Process CSV data and populate sign_types table
-        for _, row in df.iterrows():
-            # Adjust column names based on your CSV structure
-            # This is a placeholder - will need to be customized based on actual CSV
-            cursor = conn.cursor()
-            cursor.execute('''
-                INSERT OR IGNORE INTO sign_types (name, description, unit_price, material)
-                VALUES (?, ?, ?, ?)
-            ''', (row.get('name', ''), row.get('description', ''), 
-                  row.get('price', 0.0), row.get('material', '')))
-        
-        conn.commit()
-        conn.close()
-        return True
-    except Exception as e:
-        print(f"Error loading CSV: {e}")
-        return False
-
-def get_project_tree_data():
-    """Generate tree visualization data including running cost totals.
-
-    Building totals: sum of (sign/group member computed unit prices * quantities).
-    Project totals: sum of building totals.
-    Sign pricing heuristic: try area * price_per_sq_ft (or material_multiplier) else unit_price.
-    """
-    conn = sqlite3.connect(DATABASE_PATH)
-    projects_df = pd.read_sql_query("SELECT * FROM projects", conn)
-    nodes = []
-
-    # Helper to compute unit price using existing logic (reuse per_area mode to allow area attempt)
-    def _price(row_dict):
-        try:
-            return compute_unit_price(row_dict, 'per_area')
-        except Exception:
-            # Fallback minimal
-            return float(row_dict.get('unit_price') or 0)
-
-    for _, project in projects_df.iterrows():
-        project_node_index = len(nodes)
-        nodes.append({
-            'id': f"project_{project['id']}",
-            'label': project['name'],
-            'type': 'project',
-            'level': 0
-        })
-        project_total = 0.0
-
-        buildings_df = pd.read_sql_query("SELECT * FROM buildings WHERE project_id = ?", conn, params=(project['id'],))
-        for _, building in buildings_df.iterrows():
-            building_node_index = len(nodes)
-            nodes.append({
-                'id': f"building_{building['id']}",
-                'label': building['name'],
-                'type': 'building',
-                'level': 1,
-                'parent': f"project_{project['id']}"
-            })
-            building_total = 0.0
-
-            # Individual signs (include fields for pricing)
-            signs_df = pd.read_sql_query('''
-                SELECT st.name, st.unit_price, st.width, st.height, st.price_per_sq_ft, st.material_multiplier, bs.quantity
-                FROM building_signs bs
-                JOIN sign_types st ON bs.sign_type_id = st.id
-                WHERE bs.building_id = ?
-            ''', conn, params=(building['id'],))
-            for _, sign in signs_df.iterrows():
-                unit_price = _price(sign.to_dict())
-                line_total = unit_price * (sign['quantity'] or 0)
-                building_total += line_total
-                nodes.append({
-                    'id': f"sign_{building['id']}_{sign['name']}",
-                    'label': f"{sign['name']} ({sign['quantity']})",
-                    'type': 'sign',
-                    'level': 2,
-                    'parent': f"building_{building['id']}"
-                })
-
-            # Sign groups attached to building
-            groups_df = pd.read_sql_query('''
-                SELECT bsg.id, bsg.group_id, bsg.quantity, sg.name as group_name
-                FROM building_sign_groups bsg
-                JOIN sign_groups sg ON bsg.group_id = sg.id
-                WHERE bsg.building_id = ?
-            ''', conn, params=(building['id'],))
-            for _, grp in groups_df.iterrows():
-                # Aggregate cost of group members
-                members_df = pd.read_sql_query('''
-                    SELECT st.unit_price, st.width, st.height, st.price_per_sq_ft, st.material_multiplier, sgm.quantity
-                    FROM sign_group_members sgm
-                    JOIN sign_types st ON sgm.sign_type_id = st.id
-                    WHERE sgm.group_id = ?
-                ''', conn, params=(grp['group_id'],))
-                group_unit_cost = 0.0
-                for _, mem in members_df.iterrows():
-                    g_unit = _price(mem.to_dict())
-                    group_unit_cost += g_unit * (mem['quantity'] or 0)
-                building_total += group_unit_cost * (grp['quantity'] or 0)
-                # Represent group as a sign-level node
-                nodes.append({
-                    'id': f"sign_{building['id']}_group_{grp['group_id']}",
-                    'label': f"Group: {grp['group_name']} ({grp['quantity']})",
-                    'type': 'sign',
-                    'level': 2,
-                    'parent': f"building_{building['id']}"
-                })
-
-            project_total += building_total
-            # Update building node label with total
-            # Format building total with comma thousands and 2 decimals
-            nodes[building_node_index]['label'] = f"{building['name']} (${'{:,.2f}'.format(building_total)})"
-
-        # Update project node label with total
-    # Format project total similarly
-    nodes[project_node_index]['label'] = f"{project['name']} (${'{:,.2f}'.format(project_total)})"
-
-    conn.close()
-    return nodes
-
-def create_tree_visualization():
-    """Create Plotly tree visualization with rich hover for sign nodes.
-
-    Hover behavior:
-      - Project/Building nodes: simple name + aggregated total (already in label)
-      - Sign nodes: dynamic tooltip containing sign type metrics (dimensions, area, unit_price, price_per_sq_ft, material_multiplier)
-    """
-    nodes = get_project_tree_data()
-    if not nodes:
-        return go.Figure()
-    # Group by level preserving order
-    levels = {}
-    for n in nodes:
-        levels.setdefault(n['level'], []).append(n)
-    # Simple grid positioning: x by level, y by index
-    x_gap = 260
-    y_gap = 46
-    pos = {}
-    for level, lvl_nodes in levels.items():
-        for i, n in enumerate(lvl_nodes):
-            pos[n['id']] = (level * x_gap, i * y_gap)
-
-    # Pre-fetch sign type details for fast lookup
-    conn = sqlite3.connect(DATABASE_PATH)
-    try:
-        st_df = pd.read_sql_query('SELECT name, unit_price, width, height, price_per_sq_ft, material_multiplier, material, description FROM sign_types', conn)
-    except Exception:
-        st_df = pd.DataFrame(columns=['name','unit_price','width','height','price_per_sq_ft','material_multiplier','material','description'])
-    finally:
-        conn.close()
-    st_map = {r['name']: r for _, r in st_df.iterrows()}
-
-    # Build edge coordinate arrays (ultra-thin lines)
-    edge_x = []
-    edge_y = []
-    for n in nodes:
-        parent = n.get('parent')
-        if parent and parent in pos:
-            x0, y0 = pos[parent]; x1, y1 = pos[n['id']]
-            edge_x += [x0, x1, None]
-            edge_y += [y0, y1, None]
-    fig = go.Figure()
-    if edge_x:
-        fig.add_trace(go.Scatter(x=edge_x, y=edge_y, mode='lines', line=dict(color='#cccccc', width=0.5), hoverinfo='none', showlegend=False))
-    color_map = {'project': '#1f77b4', 'building': '#ff7f0e', 'sign': '#2ca02c'}
-    for lvl, lvl_nodes in levels.items():
-        # Build per-node hover text
-        texts = []
-        customdata = []
-        hovertemplate = []
-        for n in lvl_nodes:
-            if n['type'] != 'sign':
-                texts.append(n['label'])
-                customdata.append(['','','','','',''])
-                hovertemplate.append('%{text}<extra></extra>')
-            else:
-                # Parse sign name (label pattern: "<name> (qty)" or "Group: ...")
-                raw = n['label']
-                base_name = raw.split('(')[0].strip()
-                if base_name.startswith('Group:'):
-                    base_name = base_name.replace('Group:','').strip()
-                info = st_map.get(base_name)
-                if info is None:
-                    texts.append(raw)
-                    customdata.append(['','','','','',''])
-                    hovertemplate.append('%{text}<extra></extra>')
-                else:
-                    width = info.get('width') or 0
-                    height = info.get('height') or 0
-                    area = (width or 0) * (height or 0)
-                    unit_price = info.get('unit_price') or 0
-                    ppsf = info.get('price_per_sq_ft') or 0
-                    mult = info.get('material_multiplier') or 0
-                    material = info.get('material') or ''
-                    desc = (info.get('description') or '')[:120]
-                    texts.append(n['label'])
-                    customdata.append([f"{width}", f"{height}", f"{area}", f"{unit_price}", f"{ppsf}", f"{mult}"])
-                    hovertemplate.append(
-                        '<b>' + base_name + '</b><br>' +
-                        ('<i>' + desc + '</i><br>' if desc else '') +
-                        f"Material: {material}<br>" +
-                        "W: %{customdata[0]}  H: %{customdata[1]}  Area: %{customdata[2]} <br>" +
-                        "Unit Price: $%{customdata[3]}  $/SqFt: %{customdata[4]}  Mult: %{customdata[5]}<extra></extra>"
-                    )
-        fig.add_trace(go.Scatter(
-            x=[pos[n['id']][0] for n in lvl_nodes],
-            y=[pos[n['id']][1] for n in lvl_nodes],
-            mode='markers+text',
-            marker=dict(size=15, color=[color_map.get(n['type'], '#4a90e2') for n in lvl_nodes]),
-            text=texts,
-            textposition='middle right',
-            customdata=customdata,
-            hovertemplate=hovertemplate,
-            name=f'Level {lvl}'
-        ))
-    fig.update_layout(
-        title='Project Tree Visualization',
-        xaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        yaxis=dict(showgrid=False, zeroline=False, showticklabels=False),
-        height=600,
-        margin=dict(l=10, r=10, t=40, b=10),
-        showlegend=False,
-        hovermode='closest'
-    )
-    return fig
-
-def safe_tree_figure():
-    """Wrapper around create_tree_visualization that never raises; returns an error-annotated figure on failure."""
-    try:
-        return create_tree_visualization()
-    except Exception as e:
-        print(f"[tree][error] {e}", flush=True)
-        err_fig = go.Figure()
-        err_fig.add_annotation(text=f"Tree error: {e}", showarrow=False, x=0.5, y=0.5, xref='paper', yref='paper')
-        err_fig.update_layout(height=600, margin=dict(l=10, r=10, t=40, b=10))
-        return err_fig
-
-# Database already initialized above
-
+        print(f"[startup][import][warn] {e}")
+# ---------------- Consolidated Role/Tab Globals (moved here after cleanup) ---------------- #
+ROLE_OPTIONS = [
+    {'label': 'Admin', 'value': 'admin'},
+    {'label': 'Estimator', 'value': 'estimator'},
+    {'label': 'Sales', 'value': 'sales'},
+    {'label': 'Viewer', 'value': 'viewer'}
+]
+ROLE_RANK = {'admin':4,'estimator':3,'sales':2,'viewer':1}
+TAB_DEFS = [
+    ('projects-tab','Projects','viewer'),
+    ('signs-tab','Sign Types','estimator'),
+    ('groups-tab','Sign Groups','estimator'),
+    ('building-tab','Building View','viewer'),
+    ('estimates-tab','Estimates','viewer'),
+    ('import-tab','Import Data','viewer'),
+    ('tab_profiles','Pricing Profiles','admin'),
+    ('tab_snapshots','Snapshots','estimator'),
+    ('tab_templates','Bid Templates','estimator'),
+    ('tab_tags','Tags','estimator'),
+    ('tab_notes','Notes','estimator')
+]
+def build_tabs_for_role(role: str):
+    rank = ROLE_RANK.get(role or 'viewer',1)
+    tabs = []
+    for tid,label,min_role in TAB_DEFS:
+        if ROLE_RANK.get(min_role,1) <= rank:
+            tabs.append(dbc.Tab(label=label, tab_id=tid))
+    return tabs
 # App layout
 app.layout = dbc.Container([
-    # Header with logo
+    dcc.Store(id='current-role', storage_type='session'),
+    # Header with role selector
     dbc.Row([
         dbc.Col([
             html.Div([
                 html.Img(src="/assets/LSI_Logo.svg", className="app-logo me-3"),
-                html.H1("Sign Estimation Tool", className="d-inline-block align-middle mb-0")
-            ], className="d-flex align-items-center py-3")
+                html.H1("Sign Estimation Tool", className="d-inline-block align-middle mb-0 me-4"),
+                html.Div([
+                    html.Span('Role:', className='me-2 fw-semibold'),
+                    dcc.Dropdown(id='role-selector', options=ROLE_OPTIONS, value='viewer', clearable=False, style={'width':'180px','fontSize':'12px'})
+                ], className='d-flex align-items-center')
+            ], className="d-flex align-items-center py-3 flex-wrap")
         ])
     ]),
     dbc.Row([
         dbc.Col(html.Div(id='diagnostics-banner'))
     ]),
-    
-    # Navigation tabs
+    # Dynamic tabs (role filtered)
     dbc.Row([
         dbc.Col([
-            dbc.Tabs([
-                dbc.Tab(label="Projects", tab_id="projects-tab"),
-                dbc.Tab(label="Sign Types", tab_id="signs-tab"),
-                dbc.Tab(label="Sign Groups", tab_id="groups-tab"),
-                dbc.Tab(label="Building View", tab_id="building-tab"),
-                dbc.Tab(label="Estimates", tab_id="estimates-tab"),
-                dbc.Tab(label="Import Data", tab_id="import-tab")
-            ], id="main-tabs", active_tab="projects-tab")
+            dbc.Tabs(id='main-tabs', active_tab='projects-tab')
         ])
-    ], className="mb-4"),
-    
-    # Main content area
+    ], className='mb-3'),
+    dcc.Interval(id='global-dropdown-refresh', interval=int(os.getenv('SIGN_APP_DROPDOWN_REFRESH_MS','300000')), n_intervals=0),
     dcc.Store(id='app-state', data={}),
     dcc.Store(id='last-error-message'),
     dcc.Store(id='env-banner-dismissed', data=False),
-    # Lightweight periodic meta refresh (db/code timestamps)
-    dcc.Interval(id='status-refresh-interval', interval=5*60*1000, n_intervals=0),  # every 5 minutes
-    # Global toast for surfaced errors
+    dcc.Interval(id='status-refresh-interval', interval=5*60*1000, n_intervals=0),
     html.Div([
         dbc.Toast(id='app-error-toast', header='Notice', is_open=False, dismissable=True, duration=4000, icon='danger', style={'position':'fixed','top':10,'right':10,'zIndex':1080})
     ]),
-    html.Div(id="tab-content", className='flex-grow-1'),
+    html.Div(id='tab-content', className='flex-grow-1'),
     html.Footer(
         className='app-footer text-center text-muted py-3 small mt-auto',
         children=[
@@ -1177,28 +500,282 @@ app.layout = dbc.Container([
             html.Span(id='runtime-status', className='ms-3')
         ]
     )
-    
 ], fluid=True, className='d-flex flex-column min-vh-100')
 
 @app.callback(
-    Output("tab-content", "children"),
-    Input("main-tabs", "active_tab")
+    Output('current-role','data'),
+    Output('main-tabs','children'),
+    Input('role-selector','value'),
+    prevent_initial_call=False
 )
-def render_tab_content(active_tab):
-    if active_tab == "projects-tab":
+def update_role_tabs(role_value):
+    tabs = build_tabs_for_role(role_value)
+    return role_value, tabs
+
+def render_pricing_profiles_tab():
+    return html.Div([
+        html.H4('Pricing Profiles'),
+        dbc.Row([
+            dbc.Col([dbc.Label('Profile Name'), dbc.Input(id='pp-name', placeholder='Profile name')], md=3),
+            dbc.Col([
+                dbc.Label('Sales Tax Rate (%)'),
+                dbc.Input(id='pp-tax', type='number', value=0),
+                html.Small('Percent applied to taxable subtotal. Example: 7.5 = 7.5% tax.', className='text-muted d-block')
+            ], md=2),
+            dbc.Col([
+                dbc.Label('Installation Rate (%)'),
+                dbc.Input(id='pp-install', type='number', value=0),
+                html.Small('Percent of subtotal added as install in percent mode.', className='text-muted d-block')
+            ], md=2),
+            dbc.Col([
+                dbc.Label('Margin Multiplier'),
+                dbc.Input(id='pp-margin', type='number', value=1.0, step=0.01),
+                html.Small('Final total multiplier: subtotal * margin.', className='text-muted d-block')
+            ], md=2),
+            dbc.Col(dbc.Checklist(id='pp-default', options=[{'label':'Default','value':'d'}], value=[], className='mt-4'), md=1),
+            dbc.Col(dbc.Button('Create Profile', id='pp-create-btn', color='primary', className='mt-4 w-100'), md=2)
+        ], className='g-2'),
+        html.Div(id='pp-create-feedback', className='mt-2'),
+        html.Hr(),
+        dbc.Row([
+            dbc.Col([
+                html.H5('Profiles'),
+                dash_table.DataTable(id='pp-table', columns=[
+                    {'name':'ID','id':'id'}, {'name':'Name','id':'name'}, {'name':'Sales Tax','id':'sales_tax_rate'},
+                    {'name':'Install Rate','id':'installation_rate'}, {'name':'Margin Mult','id':'margin_multiplier'}, {'name':'Default','id':'is_default'}
+                ], data=[], page_size=8, style_table={'overflowX':'auto'})
+            ], md=6),
+            dbc.Col([
+                html.H5('Assign to Project'),
+                dbc.Row([
+                    dbc.Col([dbc.Label('Project'), dcc.Dropdown(id='pp-project-id', placeholder='Select project')], md=4),
+                    dbc.Col([dbc.Label('Profile'), dcc.Dropdown(id='pp-profile-id', placeholder='Select profile')], md=4),
+                    dbc.Col(dbc.Button('Assign', id='pp-assign-btn', color='info', className='mt-4 w-100'), md=4)
+                ], className='g-2'),
+                html.Div(id='pp-assign-feedback', className='mt-2'),
+                html.Hr(),
+                html.H5('Set Default'),
+                dbc.Row([
+                    dbc.Col([dbc.Label('Profile'), dcc.Dropdown(id='pp-default-id', placeholder='Select profile')], md=5),
+                    dbc.Col(dbc.Button('Make Default', id='pp-make-default-btn', color='secondary', className='mt-4 w-100'), md=5)
+                ], className='g-2'),
+                html.Div(id='pp-default-feedback', className='mt-2'),
+                html.Hr(),
+                dbc.Button('Refresh Profiles', id='pp-refresh-btn', color='secondary', className='mt-2')
+            ], md=6)
+        ])
+    ], style={'padding':'16px'})
+
+def render_snapshots_tab():
+    return html.Div([
+        html.H4('Estimate Snapshots'),
+        dbc.Row([
+            dbc.Col([dbc.Label('Project'), dcc.Dropdown(id='snap-project-id', placeholder='Select project')], md=3),
+            dbc.Col([dbc.Label('Label (optional)'), dbc.Input(id='snap-label', placeholder='Snapshot label')], md=3),
+            dbc.Col(dbc.Button('Create Snapshot', id='create-snapshot-btn', color='primary', className='mt-4 w-100'), md=2),
+            dbc.Col(dbc.Button('Refresh List', id='refresh-snapshots-btn', color='secondary', className='mt-4 w-100'), md=2)
+        ], className='g-2'),
+        html.Div(id='snapshot-create-feedback', className='mt-2'),
+        html.Hr(),
+        dbc.Row([
+            dbc.Col([
+                html.H5('Snapshots'),
+                dash_table.DataTable(id='snapshots-table', columns=[
+                    {'name':'ID','id':'id'}, {'name':'Label','id':'label'}, {'name':'Hash','id':'snapshot_hash'}, {'name':'Created','id':'created_at'}
+                ], data=[], page_size=8, style_table={'overflowX':'auto'})
+            ], md=6),
+            dbc.Col([
+                html.H5('Diff'),
+                dbc.Row([
+                    dbc.Col([dbc.Label('Snapshot A'), dbc.Input(id='diff-snap-a', type='number')], md=3),
+                    dbc.Col([dbc.Label('Snapshot B'), dbc.Input(id='diff-snap-b', type='number')], md=3),
+                    dbc.Col(dbc.Button('Run Diff', id='run-diff-btn', color='info', className='mt-4 w-100'), md=2)
+                ], className='g-2'),
+                html.Pre(id='snapshot-diff-output', style={'maxHeight':'300px','overflowY':'auto','background':'#f8f9fa','padding':'8px','fontSize':'12px'})
+            ], md=6)
+        ])
+    ], style={'padding':'16px'})
+
+def render_templates_tab():
+    return html.Div([
+        html.H4('Bid Templates'),
+        dbc.Row([
+            dbc.Col([
+                dbc.Label('Ordering'),
+                dcc.RadioItems(id='template-order-mode', options=[{'label':'Newest','value':'new'},{'label':'A→Z','value':'alpha'}], value='new', inline=True, className='small')
+            ], md=3)
+        ], className='g-2 mb-1'),
+        dbc.Row([
+            dbc.Col([dbc.Label('Template Name'), dbc.Input(id='template-name', placeholder='Template name')], md=3),
+            dbc.Col([dbc.Label('Description'), dbc.Input(id='template-desc', placeholder='Description')], md=4),
+            dbc.Col(dbc.Button('Create Template', id='create-template-btn', color='primary', className='mt-4 w-100'), md=2),
+            dbc.Col(dbc.Button('Refresh', id='refresh-templates-btn', color='secondary', className='mt-4 w-100'), md=2)
+        ], className='g-2'),
+        html.Div(id='template-create-feedback', className='mt-2'),
+        html.Hr(),
+        dbc.Row([
+            dbc.Col([
+                html.H5('Templates'),
+                dash_table.DataTable(id='templates-table', columns=[
+                    {'name':'ID','id':'id'}, {'name':'Name','id':'name'}, {'name':'Description','id':'description'}, {'name':'Created','id':'created_at'}
+                ], data=[], page_size=8, style_table={'overflowX':'auto'})
+            ], md=5),
+            dbc.Col([
+                html.H5('Add Item to Template'),
+                dbc.Row([
+                    dbc.Col([dbc.Label('Template'), dcc.Dropdown(id='template-id-item', placeholder='Select template')], md=3),
+                    dbc.Col([dbc.Label('Sign Type Name'), dbc.Input(id='template-sign-name', placeholder='Sign type name')], md=5),
+                    dbc.Col([dbc.Label('Qty'), dbc.Input(id='template-sign-qty', type='number', value=1)], md=2),
+                    dbc.Col(dbc.Button('Add Item', id='add-template-item-btn', color='success', className='mt-4 w-100'), md=2)
+                ], className='g-2'),
+                html.Div(id='template-item-feedback', className='mt-2'),
+                html.Hr(),
+                html.H5('Apply Template to Building'),
+                dbc.Row([
+                    dbc.Col([dbc.Label('Project'), dcc.Dropdown(id='apply-project-id', placeholder='Project')], md=3),
+                    dbc.Col([dbc.Label('Template'), dcc.Dropdown(id='apply-template-id', placeholder='Template')], md=3),
+                    dbc.Col([dbc.Label('Building'), dcc.Dropdown(id='apply-building-id', placeholder='Building', disabled=True)], md=3),
+                    dbc.Col(dbc.Button('Apply', id='apply-template-btn', color='info', className='mt-4 w-100'), md=2)
+                ], className='g-2'),
+                html.Div(id='apply-template-feedback', className='mt-2')
+            ], md=7)
+        ])
+    ], style={'padding':'16px'})
+
+def render_tags_tab():
+    return html.Div([
+        html.H4('Sign Type Tags'),
+        dbc.Row([
+            dbc.Col([dbc.Label('Sign Type Name'), dbc.Input(id='tag-sign-type', placeholder='Sign type name')], md=4),
+            dbc.Col([dbc.Label('Tag'), dbc.Input(id='tag-name', placeholder='Tag name')], md=3),
+            dbc.Col(dbc.Button('Add Tag', id='add-tag-btn', color='primary', className='mt-4 w-100'), md=2),
+            dbc.Col(dbc.Button('List Tags', id='list-tags-btn', color='secondary', className='mt-4 w-100'), md=2)
+        ], className='g-2'),
+        html.Div(id='tag-feedback', className='mt-2'),
+        html.Pre(id='tag-list-output', style={'background':'#f8f9fa','padding':'8px','maxHeight':'260px','overflowY':'auto','fontSize':'12px'})
+    ], style={'padding':'16px'})
+
+def render_notes_tab():
+    return html.Div([
+        html.H4('Notes'),
+        dbc.Row([
+            dbc.Col([dbc.Label('Entity Type'), dcc.Dropdown(id='note-entity-type', options=[
+                {'label':'Project','value':'project'}, {'label':'Building','value':'building'}, {'label':'Sign Type','value':'sign_type'}
+            ], value='project', clearable=False, style={'width':'160px'})], md=2),
+            dbc.Col([dbc.Label('Entity ID / Name'), dbc.Input(id='note-entity-id', placeholder='ID (project/building) or name (sign)')], md=3),
+            dbc.Col([dbc.Label('Note Text'), dbc.Input(id='note-text', placeholder='Enter note')], md=4),
+            dbc.Col(dbc.Checklist(id='note-include', options=[{'label':'Include in Export','value':'inc'}], value=['inc'], className='mt-4'), md=2),
+            dbc.Col(dbc.Button('Add Note', id='add-note-btn', color='primary', className='mt-4 w-100'), md=1)
+        ], className='g-2'),
+        html.Div(id='note-add-feedback', className='mt-2'),
+        html.Hr(),
+        dbc.Row([
+            dbc.Col([
+                html.H5('Load Notes'),
+                dbc.Row([
+                    dbc.Col([dbc.Label('Entity Type'), dcc.Dropdown(id='list-note-entity-type', options=[
+                        {'label':'Project','value':'project'}, {'label':'Building','value':'building'}, {'label':'Sign Type','value':'sign_type'}
+                    ], value='project', clearable=False, style={'width':'160px'})], md=3),
+                    dbc.Col([dbc.Label('Entity ID / Name'), dbc.Input(id='list-note-entity-id', placeholder='ID or name')], md=3),
+                    dbc.Col(dbc.Button('Load Notes', id='load-notes-btn', color='secondary', className='mt-4 w-100'), md=2)
+                ], className='g-2'),
+                dash_table.DataTable(id='notes-table', columns=[
+                    {'name':'ID','id':'id'}, {'name':'Note','id':'note'}, {'name':'Include','id':'include_in_export'}, {'name':'Created','id':'created_at'}
+                ], data=[], page_size=10, style_table={'overflowX':'auto'})
+            ], md=7),
+            dbc.Col([
+                html.H5('Toggle Include Flag'),
+                dbc.Row([
+                    dbc.Col([dbc.Label('Note ID'), dbc.Input(id='toggle-note-id', type='number')], md=5),
+                    dbc.Col(dbc.Button('Toggle', id='toggle-note-btn', color='info', className='mt-4 w-100'), md=5)
+                ], className='g-2'),
+                html.Div(id='toggle-note-feedback', className='mt-2')
+            ], md=5)
+        ])
+    ], style={'padding':'16px'})
+
+@app.callback(
+    Output('tab-content','children'),
+    Input('main-tabs','active_tab'),
+    State('current-role','data')
+)
+def render_active_tab(tab_id, role):
+    if tab_id == 'projects-tab':
         return render_projects_tab()
-    elif active_tab == "signs-tab":
+    if tab_id == 'signs-tab':
         return render_signs_tab()
-    elif active_tab == "groups-tab":
+    if tab_id == 'groups-tab':
         return render_groups_tab()
-    elif active_tab == "building-tab":
+    if tab_id == 'building-tab':
         return render_building_tab()
-    elif active_tab == "estimates-tab":
+    if tab_id == 'estimates-tab':
         return render_estimates_tab()
-    elif active_tab == "import-tab":
+    if tab_id == 'import-tab':
         return render_import_tab()
-    
-    return html.Div("Select a tab")
+    if tab_id == 'tab_profiles':
+        return render_pricing_profiles_tab()
+    if tab_id == 'tab_snapshots':
+        return render_snapshots_tab()
+    if tab_id == 'tab_templates':
+        return render_templates_tab()
+    if tab_id == 'tab_tags':
+        return render_tags_tab()
+    if tab_id == 'tab_notes':
+        return render_notes_tab()
+    return html.Div('No tab content for selection.')
+
+def get_project_tree_data():
+    nodes = []
+    try:
+        conn = sqlite3.connect(DATABASE_PATH)
+        projects_df = pd.read_sql_query("SELECT id, name FROM projects", conn)
+        for _, p in projects_df.iterrows():
+            pid = f"project_{p['id']}"; nodes.append({'id':pid,'label':p['name'],'type':'project','level':0})
+            buildings_df = pd.read_sql_query("SELECT id, name FROM buildings WHERE project_id=?", conn, params=(p['id'],))
+            for _, b in buildings_df.iterrows():
+                bid = f"building_{b['id']}"; nodes.append({'id':bid,'label':b['name'],'type':'building','level':1,'parent':pid})
+                signs_df = pd.read_sql_query('''SELECT st.name, bs.quantity FROM building_signs bs JOIN sign_types st ON bs.sign_type_id=st.id WHERE bs.building_id=?''', conn, params=(b['id'],))
+                for _, s in signs_df.iterrows():
+                    nodes.append({'id':f"sign_{b['id']}_{s['name']}", 'label':f"{s['name']} ({s['quantity']})", 'type':'sign', 'level':2, 'parent':bid})
+        conn.close()
+    except Exception as e:
+        print(f"[tree-data][warn] {e}")
+    return nodes
+
+def safe_tree_figure():
+    try:
+        nodes = get_project_tree_data()
+        if not nodes:
+            fig = go.Figure(); fig.update_layout(height=400, margin=dict(l=10,r=10,t=30,b=10)); return fig
+        levels = {}
+        for n in nodes: levels.setdefault(n['level'], []).append(n)
+        x_gap = 240; y_gap = 42
+        pos = {}
+        for lvl, arr in levels.items():
+            for i, n in enumerate(arr): pos[n['id']] = (lvl*x_gap, i*y_gap)
+        edge_x=[]; edge_y=[]
+        for n in nodes:
+            if 'parent' in n and n['parent'] in pos:
+                x0,y0 = pos[n['parent']]; x1,y1 = pos[n['id']]
+                edge_x += [x0,x1,None]; edge_y += [y0,y1,None]
+        fig = go.Figure()
+        if edge_x:
+            fig.add_trace(go.Scatter(x=edge_x,y=edge_y,mode='lines',line=dict(color='#cccccc',width=0.5),hoverinfo='none'))
+        color_map={'project':'#1f77b4','building':'#ff7f0e','sign':'#2ca02c'}
+        for lvl, arr in levels.items():
+            fig.add_trace(go.Scatter(
+                x=[pos[n['id']][0] for n in arr],
+                y=[pos[n['id']][1] for n in arr],
+                mode='markers+text',
+                marker=dict(size=14,color=[color_map.get(n['type'],'#888') for n in arr]),
+                text=[n['label'] for n in arr], textposition='middle right',
+                hovertemplate='%{text}<extra></extra>', showlegend=False
+            ))
+        fig.update_layout(height=600, margin=dict(l=10,r=10,t=35,b=10), xaxis=dict(visible=False), yaxis=dict(visible=False))
+        return fig
+    except Exception as e:
+        fig = go.Figure(); fig.add_annotation(text=f"Tree error: {e}", showarrow=False, x=0.5, y=0.5, xref='paper', yref='paper'); fig.update_layout(height=400)
+        return fig
 
 def render_projects_tab():
     """Render the projects management tab."""
@@ -3277,6 +2854,7 @@ def export_tree_png(n_clicks, fig_dict):
     try:
         import plotly.graph_objects as go
         from PIL import Image as PILImage, ImageDraw, ImageFont
+        from dash import dcc
         # Validate fig_dict structure
         if not isinstance(fig_dict, dict) or 'data' not in fig_dict:
             # Create error image
@@ -3291,8 +2869,10 @@ def export_tree_png(n_clicks, fig_dict):
             b = io.BytesIO(); err_img.save(b, format='PNG'); b.seek(0)
             return dict(content=base64.b64encode(b.read()).decode(), filename='project_tree_error.png', type='image/png')
         fig = go.Figure(fig_dict)
+        # Try high-quality export using kaleido (explicit engine) first
+        base_png = None
         try:
-            base_png = fig.to_image(format='png', scale=2)
+            base_png = fig.to_image(format='png', scale=2, engine='kaleido')
         except Exception as err:
             try:
                 import kaleido  # noqa: F401
@@ -3312,7 +2892,13 @@ def export_tree_png(n_clicks, fig_dict):
             buff_fb = io.BytesIO()
             fallback.save(buff_fb, format='PNG')
             buff_fb.seek(0)
-            return dict(content=base64.b64encode(buff_fb.read()).decode(), filename='project_tree_missing_kaleido.png', type='image/png')
+            png_fallback_bytes = buff_fb.read()
+            return dcc.send_bytes(lambda b: b.write(png_fallback_bytes), 'project_tree_missing_kaleido.png')
+        # Defensive: ensure we received bytes and PNG signature
+        if not base_png or not isinstance(base_png, (bytes, bytearray)):
+            raise ValueError('Unexpected base_png type from fig.to_image')
+        if not base_png.startswith(b'\x89PNG\r\n\x1a\n'):
+            print('[png][diag][warn] Base image missing PNG signature – attempting Pillow open & re-save')
         base_img = PILImage.open(io.BytesIO(base_png)).convert('RGBA')
         width = base_img.width
         header_h = 110
@@ -3372,11 +2958,18 @@ def export_tree_png(n_clicks, fig_dict):
         png_bytes = buff.read()
         sig = png_bytes[:8]
         valid_sig = sig == b'\x89PNG\r\n\x1a\n'
-        print(f"[png][diag] bytes={len(png_bytes)} sig={sig!r} valid_sig={valid_sig} sha1={__import__('hashlib').sha1(png_bytes).hexdigest()[:10]}")
+        sha10 = __import__('hashlib').sha1(png_bytes).hexdigest()[:10]
+        print(f"[png][diag] bytes={len(png_bytes)} sig={sig!r} valid_sig={valid_sig} sha1={sha10}")
         if not valid_sig:
-            print('[png][diag][warn] PNG signature invalid; returning anyway for inspection')
-        b64 = base64.b64encode(png_bytes).decode()
-        return dict(content=b64, filename='project_tree.png', type='image/png')
+            # Attempt force re-encode to fix
+            try:
+                fix_img = PILImage.open(io.BytesIO(png_bytes)).convert('RGB')
+                rebuff = io.BytesIO(); fix_img.save(rebuff, format='PNG'); rebuff.seek(0)
+                png_bytes = rebuff.read(); sig = png_bytes[:8]; valid_sig = sig == b'\x89PNG\r\n\x1a\n'
+                print(f"[png][diag] re-encoded valid_sig={valid_sig}")
+            except Exception as _re:
+                print(f"[png][diag][warn] re-encode failed: {_re}")
+        return dcc.send_bytes(lambda b: b.write(png_bytes), 'project_tree.png')
     except Exception as e:
         print(f"[export-tree-png][error] {e}")
         raise PreventUpdate

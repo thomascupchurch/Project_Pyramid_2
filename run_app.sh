@@ -2,10 +2,18 @@
 # Helper script to run the Sign Estimation app reliably from any location.
 # Usage (from project root):
 #   sh run_app.sh
-# Optional env vars:
+# Optional env vars or flags:
 #   SIGN_APP_PORT=8060 SIGN_APP_INITIAL_CSV=Book2.csv bash run_app.sh
+# Flags:
+#   --hide-env-notice   Suppress environment notice banner
 
 set -eu
+HIDE_NOTICE=0
+for arg in "$@"; do
+  case "$arg" in
+    --hide-env-notice) HIDE_NOTICE=1; shift;;
+  esac
+done
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 cd "$SCRIPT_DIR"
 
@@ -28,5 +36,9 @@ echo "Database: ${SIGN_APP_DB:-sign_estimation.db}"
 [ -n "${SIGN_APP_INITIAL_CSV:-}" ] && echo "Initial CSV: $SIGN_APP_INITIAL_CSV"
 echo "Port: ${SIGN_APP_PORT:-8050}" 
 
+if [ "$HIDE_NOTICE" = "1" ]; then
+  export SIGN_APP_HIDE_ENV_NOTICE=1
+  echo "(Environment notice suppressed)"
+fi
 echo "Starting app... (Ctrl+C to stop)"
 exec "$VENV_PY" app.py

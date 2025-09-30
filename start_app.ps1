@@ -10,7 +10,8 @@ param(
   [int]$Port = $env:SIGN_APP_PORT,
   [string]$Database = $env:SIGN_APP_DB,
   [string]$InitialCsv = $env:SIGN_APP_INITIAL_CSV,
-  [switch]$ForceReinstall
+  [switch]$ForceReinstall,
+  [switch]$HideEnvNotice
 )
 
 # Resolve script directory
@@ -94,6 +95,7 @@ Write-Host "Database   : $Database"
 if ($InitialCsv) { Write-Host "Initial CSV: $InitialCsv" }
 Write-Host "Port       : $Port"
 Write-Host "Working Dir: $ScriptDir"
+if ($HideEnvNotice) { Write-Host "(Env Notice suppressed)" -ForegroundColor DarkYellow }
 Write-Host "--------------------------------------------" -ForegroundColor Cyan
 
 # --- Optional Cairo runtime injection (for cairosvg SVG->PNG support) ---
@@ -118,6 +120,7 @@ if (-not $env:CAIROSVG_BACKEND) { $env:CAIROSVG_BACKEND = 'pycairo' }
 $env:SIGN_APP_PORT = $Port
 $env:SIGN_APP_DB = $Database
 if ($InitialCsv) { $env:SIGN_APP_INITIAL_CSV = $InitialCsv }
+if ($HideEnvNotice) { $env:SIGN_APP_HIDE_ENV_NOTICE = '1' }
 
 & $VenvPy app.py
 $code = $LASTEXITCODE

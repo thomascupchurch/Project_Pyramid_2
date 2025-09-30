@@ -348,6 +348,17 @@ To ignore only specific missing modules (still show others), set:
 SIGN_APP_IGNORE_MISSING=cairosvg,kaleido ./start_app.sh
 ```
 The banner will then suppress those names from the missing list.
+
+Launcher shortcuts:
+
+| Platform | Suppress Once |
+|----------|---------------|
+| PowerShell | `./start_app.ps1 -HideEnvNotice` |
+| Windows CMD (venv launcher) | `run_app.bat /HIDEENV` |
+| Windows simple launcher | `start_windows.bat /HIDEENV` |
+| macOS/Linux | `./run_app.sh --hide-env-notice` |
+
+These wrappers set `SIGN_APP_HIDE_ENV_NOTICE=1` for that session.
 ## 📊 Usage Guide
 
 ### Environment Variables
