@@ -2,6 +2,8 @@
 
 A modern Python web application for sign manufacturing cost estimation and project management, built specifically for sign manufacturing companies with teams working on Windows machines with Microsoft 365.
 
+> macOS Support: The project now includes automatic OneDrive path detection on macOS (`~/Library/CloudStorage/OneDrive-*`) and a `start_app.sh` launcher with Homebrew guidance for enabling SVG/Cairo rendering.
+
 ## 🎯 Features
 
 ### Core Functionality
@@ -34,6 +36,43 @@ A modern Python web application for sign manufacturing cost estimation and proje
 - **Conflict Resolution**: Database synchronization tools
 
 ## 🚀 Quick Start
+
+### macOS Quick Start (TL;DR)
+
+```bash
+# 1. Clone or unzip project into (optionally) your OneDrive synced folder
+cd Project_Pyramid_2
+
+# 2. Make launcher executable (first time only)
+chmod +x start_app.sh
+
+# 3. Launch (auto-creates .venv, installs deps if needed)
+./start_app.sh
+
+# 4. (Optional) Enable SVG/Cairo rendering if you need SVG logos/images in PDF
+brew install cairo pango libffi pkg-config        # Homebrew install
+pip install --force-reinstall cairosvg            # Rebuild Python binding after libs
+
+# 5. Re-run launcher
+./start_app.sh
+
+# 6. Verify environment (shows any degraded capabilities)
+python scripts/verify_env.py
+
+# 7. Customize (examples)
+SIGN_APP_PORT=8060 SIGN_APP_HOST=0.0.0.0 ./start_app.sh
+DISABLE_SVG_RENDER=1 ./start_app.sh               # Skip SVG rasterization fallback
+```
+
+Key paths macOS auto-detects for OneDrive: `~/Library/CloudStorage/OneDrive-*` (new client) or legacy `~/OneDrive`. Override by setting `ONEDRIVE_SYNC_DIR` if needed.
+
+If Cairo native libs remain undiscovered, ensure your lib path is exported:
+
+```bash
+export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/lib:${DYLD_FALLBACK_LIBRARY_PATH}"
+```
+
+Then retry `python scripts/verify_env.py`.
 
 ### Prerequisites
 
@@ -139,7 +178,7 @@ Planned (optional) future expansions: multiple images per sign, export embedding
 | CAIROSVG_BACKEND      | Force cairosvg backend (e.g. pycairo)    | (unset)            |
 | DISABLE_SVG_RENDER    | Skip SVG rasterization (fallback header) | 0                  |
 
-### SVG Rendering (Cairo) on Windows
+### SVG Rendering (Cairo) on Windows & macOS
 
 The PDF export attempts to rasterize SVG logos and sign images via `cairosvg`. On Windows this requires Cairo native DLLs. If they are missing you will see warnings in `scripts/verify_env.py` like:
 
@@ -147,11 +186,27 @@ The PDF export attempts to rasterize SVG logos and sign images via `cairosvg`. O
 [MISSING] cairosvg: no library called "cairo-2" was found
 ```
 
-Options to enable SVG rendering:
+Options to enable SVG rendering (Windows):
 
 1. Install pycairo (already in requirements or: `pip install pycairo`).  
 2. Provide native Cairo DLLs via a GTK runtime or MSYS2 and add their `bin` directory to `PATH`.  
 3. Drop required DLLs (e.g. `libcairo-2.dll`, `libpng16-16.dll`, `zlib1.dll`, `libpixman-1-0.dll`, `libfreetype-6.dll`) into a local `cairo_runtime/` folder at the project root; the PowerShell launcher `start_app.ps1` will prepend that folder to `PATH` automatically.
+
+macOS enable steps:
+
+1. Install native libs via Homebrew:
+   ```bash
+   brew install cairo pango libffi pkg-config
+   ```
+2. Reinstall cairosvg after libs present (if previously failing):
+   ```bash
+   pip install --force-reinstall cairosvg
+   ```
+3. Launch using `./start_app.sh` (creates venv if missing).
+4. If libraries still not found (rare), set fallback path (Apple Silicon example):
+   ```bash
+   export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/lib:${DYLD_FALLBACK_LIBRARY_PATH}"
+   ```
 
 Environment helpers:
 
@@ -175,10 +230,10 @@ LAN deployment here is plain HTTP inside your internal network. Do not expose di
 
 3. **Run the Application (macOS/Linux)**:
    ```bash
-   # One-off
-   .venv/bin/python app.py
-   # Or using helper script (auto uses venv)
-   SIGN_APP_INITIAL_CSV=Book2.csv SIGN_APP_PORT=8060 bash run_app.sh
+   chmod +x start_app.sh
+   ./start_app.sh
+   # With overrides
+   SIGN_APP_PORT=8060 SIGN_APP_INITIAL_CSV=Book2.csv ./start_app.sh
    ```
 4. **Run the Application (Windows)**:
    ```bat
@@ -194,9 +249,9 @@ LAN deployment here is plain HTTP inside your internal network. Do not expose di
 5. **Access the Application**:
    Open your web browser and go to `http://localhost:8050`
 
-### Deployment to OneDrive
+### Deployment to OneDrive (Windows & macOS)
 
-1. **Deploy to OneDrive** (path optional on Windows; script tries to autodetect):
+1. **Deploy to OneDrive** (Windows path optional; mac auto-detects `~/Library/CloudStorage/OneDrive-*` when unset):
 
    ```bash
    python scripts/deploy.py --onedrive-path "C:\\Users\\Username\\OneDrive\\Shared\\SignEstimation"
@@ -204,7 +259,8 @@ LAN deployment here is plain HTTP inside your internal network. Do not expose di
    python scripts/deploy.py
    ```
 
-2. **On Team Machines**: Navigate to the OneDrive folder and run `start_app.bat` or `start_app.ps1`
+2. **On Windows Machines**: Run `start_app.bat` or `start_app.ps1`
+3. **On macOS Machines**: Run `./start_app.sh` (first time: `chmod +x start_app.sh`)
 
 ### One-Step Build + Deploy (Developer)
 

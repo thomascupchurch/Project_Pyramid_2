@@ -128,6 +128,110 @@ class DatabaseManager:
         except Exception:
             pass
 
+        # New feature tables (category one)
+        try:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS user_roles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                username TEXT NOT NULL UNIQUE,
+                role TEXT NOT NULL CHECK(role IN ('admin','estimator','sales','viewer')),
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+        except Exception:
+            pass
+        try:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS audit_log (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action TEXT NOT NULL,
+                entity TEXT NOT NULL,
+                entity_id INTEGER,
+                meta JSON,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_audit_entity ON audit_log(entity, entity_id)')
+        except Exception:
+            pass
+        try:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS estimate_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                project_id INTEGER NOT NULL,
+                label TEXT,
+                snapshot_hash TEXT,
+                data JSON NOT NULL,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+                FOREIGN KEY (project_id) REFERENCES projects(id) ON DELETE CASCADE
+            )''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_snapshots_project ON estimate_snapshots(project_id, created_at)')
+        except Exception:
+            pass
+        # Pricing profiles (assignable to projects)
+        try:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS pricing_profiles (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                sales_tax_rate REAL DEFAULT 0.0,
+                installation_rate REAL DEFAULT 0.0,
+                margin_multiplier REAL DEFAULT 1.0,
+                is_default BOOLEAN DEFAULT 0,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+        except Exception:
+            pass
+        # Add profile_id to projects if missing
+        try:
+            cursor.execute('PRAGMA table_info(projects)')
+            proj_cols = [r[1] for r in cursor.fetchall()]
+            if 'pricing_profile_id' not in proj_cols:
+                cursor.execute('ALTER TABLE projects ADD COLUMN pricing_profile_id INTEGER REFERENCES pricing_profiles(id)')
+        except Exception:
+            pass
+        # Tagging
+        try:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS sign_type_tags (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS sign_type_tag_map (
+                sign_type_id INTEGER NOT NULL,
+                tag_id INTEGER NOT NULL,
+                PRIMARY KEY (sign_type_id, tag_id),
+                FOREIGN KEY (sign_type_id) REFERENCES sign_types(id) ON DELETE CASCADE,
+                FOREIGN KEY (tag_id) REFERENCES sign_type_tags(id) ON DELETE CASCADE
+            )''')
+        except Exception:
+            pass
+        # Notes (generic entity notes)
+        try:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS notes (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                entity_type TEXT NOT NULL, -- e.g. 'building','sign_type','project'
+                entity_id INTEGER NOT NULL,
+                note TEXT NOT NULL,
+                include_in_export BOOLEAN DEFAULT 1,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            cursor.execute('CREATE INDEX IF NOT EXISTS idx_notes_entity ON notes(entity_type, entity_id)')
+        except Exception:
+            pass
+        # Bid templates
+        try:
+            cursor.execute('''CREATE TABLE IF NOT EXISTS bid_templates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+            )''')
+            cursor.execute('''CREATE TABLE IF NOT EXISTS bid_template_items (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                template_id INTEGER NOT NULL,
+                sign_type_id INTEGER NOT NULL,
+                quantity INTEGER DEFAULT 1,
+                FOREIGN KEY (template_id) REFERENCES bid_templates(id) ON DELETE CASCADE,
+                FOREIGN KEY (sign_type_id) REFERENCES sign_types(id) ON DELETE CASCADE
+            )''')
+        except Exception:
+            pass
+
         # Backfill: if sign_types.image_path present but no corresponding row in sign_type_images, insert it
         try:
             cursor.execute('''SELECT id, image_path FROM sign_types WHERE image_path IS NOT NULL AND TRIM(image_path) <> '' ''')
@@ -193,6 +297,13 @@ class DatabaseManager:
                     float(width or 0),
                     float(height or 0)
                 ))
+                try:
+                    self._log_audit('import_or_replace','sign_types', None, {
+                        'name': str(row.get('name', '')),
+                        'unit_price': float(unit_price or 0)
+                    })
+                except Exception:
+                    pass
             
             conn.commit()
             conn.close()
@@ -244,6 +355,10 @@ class DatabaseManager:
                 conn.close()
                 return False, f"Sign type '{sign_name}' not found"
             conn.commit(); conn.close()
+            try:
+                self._log_audit('update_image','sign_types', None, {'name': sign_name, 'image_path': image_rel_path})
+            except Exception:
+                pass
             return True, 'Image path updated'
         except Exception as e:
             return False, f'Error setting image: {e}'
@@ -256,6 +371,15 @@ class DatabaseManager:
             conn.close()
             return None
         project = _proj_df.iloc[0]
+        # Optional pricing profile override
+        profile = None
+        if 'pricing_profile_id' in project and project['pricing_profile_id']:
+            try:
+                prof_df = pd.read_sql_query('SELECT * FROM pricing_profiles WHERE id=?', conn, params=(int(project['pricing_profile_id']),))
+                if not prof_df.empty:
+                    profile = prof_df.iloc[0]
+            except Exception:
+                profile = None
 
         estimate_data = []
         total_cost = 0.0
@@ -275,6 +399,12 @@ class DatabaseManager:
             ''', conn, params=(building['id'],))
             for _, sign in signs.iterrows():
                 price = sign['custom_price'] if sign['custom_price'] else sign['unit_price']
+                # Apply margin multiplier if pricing profile present
+                if profile is not None and 'margin_multiplier' in profile and profile['margin_multiplier'] not in (None, 0, 1):
+                    try:
+                        price = float(price) * float(profile['margin_multiplier'])
+                    except Exception:
+                        pass
                 line_total = price * sign['quantity']
                 building_cost += line_total
                 estimate_data.append({
@@ -300,7 +430,15 @@ class DatabaseManager:
                     JOIN sign_groups sg ON sgm.group_id = sg.id
                     WHERE sg.name = ?
                 ''', conn, params=(group['group_name'],))
-                group_total = sum(row['unit_price'] * row['quantity'] for _, row in group_signs.iterrows())
+                group_total = 0.0
+                for _, row in group_signs.iterrows():
+                    gp = row['unit_price']
+                    if profile is not None and 'margin_multiplier' in profile and profile['margin_multiplier'] not in (None, 0, 1):
+                        try:
+                            gp = float(gp) * float(profile['margin_multiplier'])
+                        except Exception:
+                            pass
+                    group_total += gp * row['quantity']
                 line_total = group_total * group['group_quantity']
                 building_cost += line_total
                 estimate_data.append({
@@ -314,8 +452,20 @@ class DatabaseManager:
                 })
             total_cost += building_cost
 
-        if project['include_installation'] and project['installation_rate']:
-            installation_cost = total_cost * project['installation_rate']
+        # Resolve effective installation & tax rates: profile overrides when present
+        eff_install_rate = project['installation_rate']
+        eff_tax_rate = project['sales_tax_rate']
+        if profile is not None:
+            try:
+                if profile.get('installation_rate') not in (None, ''):
+                    eff_install_rate = float(profile.get('installation_rate'))
+                if profile.get('sales_tax_rate') not in (None, ''):
+                    eff_tax_rate = float(profile.get('sales_tax_rate'))
+            except Exception:
+                pass
+
+        if project['include_installation'] and eff_install_rate:
+            installation_cost = total_cost * eff_install_rate
             total_cost += installation_cost
             estimate_data.append({
                 'Building': 'ALL',
@@ -326,8 +476,8 @@ class DatabaseManager:
                 'Unit_Price': installation_cost,
                 'Total': installation_cost
             })
-        if project['include_sales_tax'] and project['sales_tax_rate']:
-            tax_cost = total_cost * project['sales_tax_rate']
+        if project['include_sales_tax'] and eff_tax_rate:
+            tax_cost = total_cost * eff_tax_rate
             total_cost += tax_cost
             estimate_data.append({
                 'Building': 'ALL',
@@ -370,6 +520,11 @@ class DatabaseManager:
                            SET price_per_sq_ft=?, unit_price=?, last_modified=CURRENT_TIMESTAMP
                            WHERE id=?''', (float(ppsf), float(unit_price), sid))
             updated += 1
+        try:
+            if updated:
+                self._log_audit('recalc_prices','sign_types', None, {'rows_updated': updated})
+        except Exception:
+            pass
         conn.commit()
         conn.close()
         return updated
@@ -394,3 +549,169 @@ class DatabaseManager:
             return True, f"Database backed up to {backup_path}"
         except Exception as e:
             return False, f"Backup failed: {str(e)}"
+
+    # ----------------------- Category One Feature Methods -----------------------
+    def _log_audit(self, action: str, entity: str, entity_id: int | None, meta: dict | None = None):
+        try:
+            conn = sqlite3.connect(self.db_path)
+            cur = conn.cursor()
+            cur.execute('INSERT INTO audit_log(action, entity, entity_id, meta) VALUES (?,?,?,?)',
+                        (action, entity, entity_id, json.dumps(meta or {})))
+            conn.commit(); conn.close()
+        except Exception:
+            pass
+
+    # Role management (simple)
+    def set_user_role(self, username: str, role: str):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('INSERT INTO user_roles(username, role) VALUES(?,?) ON CONFLICT(username) DO UPDATE SET role=excluded.role', (username, role))
+        conn.commit(); conn.close()
+        self._log_audit('set_role','user_roles', None, {'username': username, 'role': role})
+
+    def get_user_role(self, username: str) -> str | None:
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('SELECT role FROM user_roles WHERE username=?',(username,))
+        row = cur.fetchone(); conn.close(); return row[0] if row else None
+
+    # Pricing profiles
+    def create_pricing_profile(self, name: str, sales_tax_rate: float = 0.0, installation_rate: float = 0.0, margin_multiplier: float = 1.0, is_default: bool = False):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('''INSERT INTO pricing_profiles(name, sales_tax_rate, installation_rate, margin_multiplier, is_default)
+                       VALUES(?,?,?,?,?)''', (name, sales_tax_rate, installation_rate, margin_multiplier, 1 if is_default else 0))
+        pid = cur.lastrowid
+        if is_default:
+            cur.execute('UPDATE pricing_profiles SET is_default=0 WHERE id<>?', (pid,))
+            cur.execute('UPDATE projects SET pricing_profile_id=? WHERE pricing_profile_id IS NULL', (pid,))
+        conn.commit(); conn.close()
+        self._log_audit('create','pricing_profiles', pid, {'name': name})
+        return pid
+
+    def assign_pricing_profile_to_project(self, project_id: int, profile_id: int):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('UPDATE projects SET pricing_profile_id=?, last_modified=CURRENT_TIMESTAMP WHERE id=?', (profile_id, project_id))
+        conn.commit(); conn.close()
+        self._log_audit('assign_profile','projects', project_id, {'profile_id': profile_id})
+
+    # Tagging
+    def ensure_tag(self, name: str) -> int:
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('INSERT INTO sign_type_tags(name) VALUES(?) ON CONFLICT(name) DO NOTHING', (name,))
+        conn.commit()
+        cur.execute('SELECT id FROM sign_type_tags WHERE name=?',(name,))
+        tid = cur.fetchone()[0]
+        conn.close(); return tid
+
+    def tag_sign_type(self, sign_type_name: str, tag_name: str):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('SELECT id FROM sign_types WHERE lower(name)=lower(?)',(sign_type_name,))
+        row = cur.fetchone()
+        if not row:
+            conn.close(); return False, 'sign type not found'
+        stid = row[0]
+        tid = self.ensure_tag(tag_name)
+        cur.execute('INSERT OR IGNORE INTO sign_type_tag_map(sign_type_id, tag_id) VALUES(?,?)',(stid, tid))
+        conn.commit(); conn.close()
+        self._log_audit('tag','sign_types', stid, {'tag': tag_name})
+        return True, 'tag added'
+
+    def list_tags_for_sign_type(self, sign_type_name: str):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('''SELECT stt.name FROM sign_type_tags stt
+                       JOIN sign_type_tag_map m ON m.tag_id=stt.id
+                       JOIN sign_types s ON s.id=m.sign_type_id
+                       WHERE lower(s.name)=lower(?) ORDER BY stt.name''',(sign_type_name,))
+        rows = [r[0] for r in cur.fetchall()]; conn.close(); return rows
+
+    # Notes
+    def add_note(self, entity_type: str, entity_id: int, note: str, include_in_export: bool = True):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('INSERT INTO notes(entity_type, entity_id, note, include_in_export) VALUES(?,?,?,?)', (entity_type, entity_id, note, 1 if include_in_export else 0))
+        nid = cur.lastrowid; conn.commit(); conn.close()
+        self._log_audit('add_note', entity_type, entity_id, {'note_id': nid})
+        return nid
+
+    def list_notes(self, entity_type: str, entity_id: int, export_only: bool = False):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        if export_only:
+            cur.execute('SELECT id, note, created_at FROM notes WHERE entity_type=? AND entity_id=? AND include_in_export=1 ORDER BY created_at',(entity_type, entity_id))
+        else:
+            cur.execute('SELECT id, note, include_in_export, created_at FROM notes WHERE entity_type=? AND entity_id=? ORDER BY created_at',(entity_type, entity_id))
+        rows = cur.fetchall(); conn.close(); return rows
+
+    # Bid templates
+    def create_bid_template(self, name: str, description: str = '') -> int:
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('INSERT INTO bid_templates(name, description) VALUES(?,?)',(name, description))
+        tid = cur.lastrowid; conn.commit(); conn.close()
+        self._log_audit('create','bid_templates', tid, {'name': name})
+        return tid
+
+    def add_item_to_template(self, template_id: int, sign_type_name: str, quantity: int = 1):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('SELECT id FROM sign_types WHERE lower(name)=lower(?)',(sign_type_name,))
+        row = cur.fetchone()
+        if not row:
+            conn.close(); return False, 'sign type not found'
+        stid = row[0]
+        cur.execute('INSERT INTO bid_template_items(template_id, sign_type_id, quantity) VALUES(?,?,?)',(template_id, stid, quantity))
+        conn.commit(); conn.close()
+        self._log_audit('add_item','bid_templates', template_id, {'sign_type_id': stid, 'qty': quantity})
+        return True, 'item added'
+
+    def apply_template_to_building(self, template_id: int, building_id: int, group_as_single: bool = False):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('SELECT sign_type_id, quantity FROM bid_template_items WHERE template_id=?',(template_id,))
+        items = cur.fetchall()
+        for stid, qty in items:
+            cur.execute('INSERT INTO building_signs(building_id, sign_type_id, quantity) VALUES(?,?,?)',(building_id, stid, qty))
+        conn.commit(); conn.close()
+        self._log_audit('apply_template','buildings', building_id, {'template_id': template_id, 'count': len(items)})
+        return len(items)
+
+    # Estimate snapshots
+    def create_estimate_snapshot(self, project_id: int, label: str | None = None):
+        data = self.get_project_estimate(project_id)
+        if data is None:
+            return False, 'project not found'
+        payload = json.dumps(data, sort_keys=True)
+        import hashlib
+        snap_hash = hashlib.sha1(payload.encode('utf-8')).hexdigest()
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('INSERT INTO estimate_snapshots(project_id, label, snapshot_hash, data) VALUES(?,?,?,?)',(project_id, label, snap_hash, payload))
+        sid = cur.lastrowid; conn.commit(); conn.close()
+        self._log_audit('snapshot','projects', project_id, {'snapshot_id': sid})
+        return True, sid
+
+    def list_estimate_snapshots(self, project_id: int):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('SELECT id, label, snapshot_hash, created_at FROM estimate_snapshots WHERE project_id=? ORDER BY created_at DESC',(project_id,))
+        rows = cur.fetchall(); conn.close(); return rows
+
+    def diff_snapshots(self, snapshot_a: int, snapshot_b: int):
+        conn = sqlite3.connect(self.db_path); cur = conn.cursor()
+        cur.execute('SELECT data FROM estimate_snapshots WHERE id=?',(snapshot_a,)); a = cur.fetchone()
+        cur.execute('SELECT data FROM estimate_snapshots WHERE id=?',(snapshot_b,)); b = cur.fetchone()
+        conn.close()
+        if not a or not b:
+            return None
+        da = {f"{r['Building']}|{r['Item']}": r for r in json.loads(a[0])}
+        db = {f"{r['Building']}|{r['Item']}": r for r in json.loads(b[0])}
+        added = [db[k] for k in db.keys() - da.keys()]
+        removed = [da[k] for k in da.keys() - db.keys()]
+        changed = []
+        for k in da.keys() & db.keys():
+            if da[k].get('Total') != db[k].get('Total') or da[k].get('Quantity') != db[k].get('Quantity'):
+                changed.append({'key': k, 'from': da[k], 'to': db[k]})
+        return {'added': added, 'removed': removed, 'changed': changed}
+
+    # Convenience for client-facing mode: trimming sensitive fields
+    def build_client_facing_estimate(self, project_id: int):
+        data = self.get_project_estimate(project_id)
+        if not data:
+            return []
+        sanitized = []
+        for row in data:
+            nr = dict(row)
+            nr.pop('Unit_Price', None)  # remove per-sign price
+            sanitized.append(nr)
+        return sanitized

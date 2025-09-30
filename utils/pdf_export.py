@@ -63,8 +63,35 @@ def _make_thumb(path: Path) -> str | None:
         return None
 
 
-def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, title: str, database_path: str, *, disable_logo: bool = False, embed_images: bool = True, multi_image_lookup: Dict[str, List[str]] | None = None) -> Tuple[bytes, Dict[str, Any]]:
+def generate_estimate_pdf(
+    table_data: List[Dict[str, Any]],
+    summary_text: str,
+    title: str,
+    database_path: str,
+    *,
+    disable_logo: bool = False,
+    embed_images: bool = True,
+    multi_image_lookup: Dict[str, List[str]] | None = None,
+    client_facing: bool = False,
+    notes: List[Dict[str, Any]] | None = None,
+    change_log: List[Dict[str, Any]] | None = None,
+    hide_unit_price: bool | None = None,
+) -> Tuple[bytes, Dict[str, Any]]:
     """Build the estimate PDF and return raw bytes plus diagnostics.
+
+    Parameters
+    ---------
+    table_data: list of dict rows (already aggregated)
+    summary_text: textual summary / disclaimers
+    title: main document title
+    database_path: path to sqlite DB (used for image lookups)
+    disable_logo: skip logo rendering
+    embed_images: include image thumbnail column
+    multi_image_lookup: optional mapping sign_name -> list of additional image paths (first considered primary)
+    client_facing: when True hides internal costing columns (Unit $ + Line Total) unless explicitly overridden
+    notes: optional list of note dicts with fields: scope (Project|Building|Sign), ref, text, include_in_export(bool)
+    change_log: optional list of change dicts with keys like: ts, user, action, detail
+    hide_unit_price: optional explicit override for hiding the unit price column (takes precedence); if None uses client_facing flag
 
     The ordering groups exterior (install_type substring 'ext') first then others.
     """
@@ -204,7 +231,16 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
     except Exception:
         sorted_table_data = table_data
 
-    headers = ['Img', 'Building', 'Item', 'Material', 'Dimensions', 'Qty', 'Unit $', 'Line Total']
+    # Determine visibility of price columns
+    if hide_unit_price is None:
+        hide_unit_price = client_facing  # default policy: hide in client mode
+    hide_line_total = client_facing  # always hide line total in client-facing exported detailed table
+
+    headers = ['Img', 'Building', 'Item', 'Material', 'Dimensions', 'Qty']
+    if not hide_unit_price:
+        headers.append('Unit $')
+    if not hide_line_total:
+        headers.append('Line Total')
     rows = [headers]
 
     def fmt_money(v):
@@ -256,27 +292,41 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
         item_para = Paragraph(str(item), cell_style)
         material_para = Paragraph(str(r.get('Material', '')), cell_style)
         dim_para = Paragraph(str(r.get('Dimensions', '')), cell_style)
-        rows.append([
+        row_cells = [
             img_flow,
             Paragraph(str(r.get('Building', '')), cell_style),
             item_para,
             material_para,
             dim_para,
             Paragraph(str(r.get('Quantity', '')), cell_style),
-            Paragraph(fmt_money(r.get('Unit_Price', '')), cell_style),
-            Paragraph(fmt_money(r.get('Total', '')), cell_style)
-        ])
+        ]
+        if not hide_unit_price:
+            row_cells.append(Paragraph(fmt_money(r.get('Unit_Price', '')), cell_style))
+        if not hide_line_total:
+            row_cells.append(Paragraph(fmt_money(r.get('Total', '')), cell_style))
+        rows.append(row_cells)
         data_row_indices.append(len(rows)-1)
 
     from reportlab.platypus import Table as RLTable, TableStyle as RLTableStyle, Paragraph as RLParagraph
     # Adjusted column widths for better readability
     # If images disabled, remove first column definitions
+    # Dynamically build column widths based on hidden columns
+    def _col_widths():
+        # Base widths (with images): Img, Building, Item, Material, Dimensions, Qty, Unit, LineTotal
+        base = []
+        if embed_images:
+            base.append(34)  # image
+        base.extend([60, 150, 90, 70, 34])  # building..qty
+        if not hide_unit_price:
+            base.append(55)
+        if not hide_line_total:
+            base.append(65)
+        return base
     if not embed_images:
-        # remove Img header cell
         rows = [r[1:] if i==0 else r[1:] for i,r in enumerate(rows)]
-        detail_tbl = RLTable(rows, repeatRows=1, colWidths=[60, 150, 90, 70, 34, 55, 65])
+        detail_tbl = RLTable(rows, repeatRows=1, colWidths=_col_widths())
     else:
-        detail_tbl = RLTable(rows, repeatRows=1, colWidths=[34, 60, 150, 90, 70, 34, 55, 65])
+        detail_tbl = RLTable(rows, repeatRows=1, colWidths=_col_widths())
     detail_tbl.setStyle(RLTableStyle([
         ('BACKGROUND', (0, 0), (-1, 0), colors.HexColor('#1f4e79')),
         ('TEXTCOLOR', (0, 0), (-1, 0), colors.whitesmoke),
@@ -287,7 +337,7 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
         ('FONTSIZE', (0, 1), (-1, -1), 8),
         ('VALIGN', (0, 0), (-1, -1), 'TOP'),
         ('ROWBACKGROUNDS', (0, 1), (-1, -1), [colors.whitesmoke, colors.Color(0.97, 0.97, 0.97)]),
-        ('ALIGN', (-2, 1), (-1, -1), 'RIGHT'),
+        ('ALIGN', (-2, 1), (-1, -1), 'RIGHT'),  # last numeric columns right aligned
         ('RIGHTPADDING', (-2, 0), (-1, -1), 4),
         ('LEFTPADDING', (0, 0), (-1, -1), 4),
         ('TOPPADDING', (0, 0), (-1, -1), 3),
@@ -296,11 +346,12 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
     story.append(detail_tbl)
     # Summary subtotals
     story.append(Spacer(1, 14))
-    subtotal_rows = [
-        ['Exterior Subtotal', fmt_money(exterior_subtotal)],
-        ['Interior Subtotal', fmt_money(interior_subtotal)],
-        ['Grand Total', fmt_money(exterior_subtotal + interior_subtotal)]
-    ]
+    subtotal_rows = []
+    # In client-facing mode we only show Grand Total (optionally could show nothing if sensitive)
+    if not client_facing:
+        subtotal_rows.append(['Exterior Subtotal', fmt_money(exterior_subtotal)])
+        subtotal_rows.append(['Interior Subtotal', fmt_money(interior_subtotal)])
+    subtotal_rows.append(['Grand Total', fmt_money(exterior_subtotal + interior_subtotal)])
     subtotal_tbl = Table(subtotal_rows, hAlign='LEFT', colWidths=[130, 100])
     subtotal_tbl.setStyle(TableStyle([
         ('FONTNAME', (0, 0), (-1, -1), 'Helvetica'),
@@ -315,6 +366,43 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
     story.append(Spacer(1, 18))
     story.append(Paragraph('<font size=8 color="#555555">Prepared using the internal Sign Estimation Tool. Figures are for estimation purposes only.</font>', styles['Normal']))
 
+    # Optional Notes Section (appendix-like but before multi-image appendix)
+    notes_included = 0
+    if notes:
+        exportable = [n for n in notes if n.get('include_in_export', True) and n.get('text')]
+        if exportable:
+            from reportlab.platypus import PageBreak
+            story.append(PageBreak())
+            story.append(Paragraph('<b>Notes</b>', styles['Normal']))
+            story.append(Spacer(1, 8))
+            for n in exportable:
+                scope = n.get('scope', 'General')
+                ref = n.get('ref') or ''
+                txt = n.get('text', '')
+                note_line = f"<b>{scope}</b>{' - ' + ref if ref else ''}: {txt}"
+                story.append(Paragraph(note_line, styles['BodyText']))
+                story.append(Spacer(1, 4))
+            notes_included = len(exportable)
+
+    # Optional Change Log Section
+    change_log_entries = 0
+    if change_log:
+        cl = [c for c in change_log if c]
+        if cl:
+            from reportlab.platypus import PageBreak
+            story.append(PageBreak())
+            story.append(Paragraph('<b>Change Log</b>', styles['Normal']))
+            story.append(Spacer(1, 8))
+            for c in cl:
+                ts = c.get('ts') or c.get('timestamp') or ''
+                user = c.get('user') or 'system'
+                action = c.get('action') or c.get('event') or 'update'
+                detail = c.get('detail') or c.get('details') or ''
+                line = f"{ts} - {user}: {action} {detail}".strip()
+                story.append(Paragraph(line, styles['BodyText']))
+                story.append(Spacer(1, 4))
+            change_log_entries = len(cl)
+
     # Appendix pages for multi-images (basic stub): show additional images if provided in multi_image_lookup
     appendix_count = 0
     if embed_images and multi_image_lookup:
@@ -328,6 +416,17 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
             story.append(Spacer(1, 8))
             for p in extra[1:]:  # skip cover (assumed first)
                 thumbp = get_or_build_thumbnail(p, 300, 180) or p
+                # If still an SVG and cairosvg available, attempt rasterization
+                if str(thumbp).lower().endswith('.svg'):
+                    try:
+                        import cairosvg, tempfile as _tmp
+                        tmpf = _tmp.NamedTemporaryFile(suffix='.png', delete=False)
+                        cairosvg.svg2png(url=str(thumbp), write_to=tmpf.name, output_width=300)
+                        thumbp = tmpf.name
+                        svg_rendered_any = True
+                    except Exception:
+                        # Skip problematic SVG rather than failing entire export
+                        continue
                 try:
                     story.append(RLImage(str(thumbp), width=260, height=140))
                     story.append(Spacer(1, 6))
@@ -363,6 +462,11 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
         'image_column': bool(embed_images),  # image column present when embed_images True
         'appendix_count': appendix_count,
         'svg_render_enabled': svg_rendered_any,
+        'client_facing': bool(client_facing),
+        'notes_count': notes_included,
+        'change_log_entries': change_log_entries,
+        'unit_price_hidden': bool(hide_unit_price),
+        'line_total_hidden': bool(hide_line_total),
     }
     return pdf_bytes, diag
 
