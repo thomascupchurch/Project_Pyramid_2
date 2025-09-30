@@ -164,7 +164,27 @@ Share your Mac's LAN IP: `http://<your-ip>:8050`
 `svg_render_enabled` (in PDF diagnostics) indicates whether at least one SVG was successfully rasterized this session (logo or appendix image). Use it to confirm your cairo setup.
 
 ---
-## 14. Quick Copy/Paste Recap
+## 14. Custom Logo Override
+Set a specific logo file (supports SVG / PNG / JPG). SVG preferred for crisp scaling.
+```bash
+export SIGN_APP_LOGO_PATH="/path/to/branding/LSI_Logo.svg"
+./start_app.sh
+```
+If raster fallback triggers, diagnostics will include `fallback_extracted_raster`.
+
+---
+## 15. Support Checklist
+Include when reporting issues:
+- `python3 --version`
+- macOS version: `sw_vers`
+- `which python3` path
+- Excerpt of last 30 lines terminal output
+- Whether `[pdf][logo]` log line appears
+- Value of `SIGN_APP_LOGO_PATH` (if set)
+- Output of: `python scripts/verify_env.py`
+
+---
+## 16. Quick Copy/Paste Recap
 ```bash
 chmod +x start_app.sh
 ./start_app.sh

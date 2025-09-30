@@ -130,7 +130,14 @@ def generate_estimate_pdf(
     candidates = []
     if env_logo:
         candidates.append(Path(env_logo))
+    # Prefer raster formats first to avoid native cairo dependency on Windows environments
     candidates.extend([
+        Path('assets') / 'LSI_Logo.png',
+        Path('assets') / 'LSI_Logo.jpg',
+        Path('assets') / 'LSI_Logo.jpeg',
+        Path('LSI_Logo.png'),
+        Path('LSI_Logo.jpg'),
+        Path('LSI_Logo.jpeg'),
         Path('assets') / 'LSI_Logo.svg',
         Path('LSI_Logo.svg'),
         Path('assets') / 'lsi_logo.svg',
@@ -149,39 +156,69 @@ def generate_estimate_pdf(
     elif not chosen:
         logo_diag['error'] = 'not_found_any'
     else:
-        logo_diag['attempted'] = True
-        logo_diag['found'] = True
-        try:
+        # We'll attempt each candidate in order until one renders.
+        for candidate in [c for c in candidates if c.exists()]:
+            chosen = candidate
+            logo_diag['attempted'] = True
+            logo_diag['found'] = True
             try:
-                import cairosvg  # noqa: F401
-                cairosvg_available = True
-            except Exception:
-                cairosvg_available = False
-            if chosen.suffix.lower() == '.svg' and cairosvg_available:
-                # Render SVG to PNG bytes directly (no temp file dependency) so that the
-                # embedded image persists even if temporary files are cleaned or locked.
-                import cairosvg
-                from reportlab.platypus import Image
-                from reportlab.lib.utils import ImageReader
                 try:
-                    png_bytes = cairosvg.svg2png(url=str(chosen), output_width=300)
-                    img_reader = ImageReader(io.BytesIO(png_bytes))
-                    story.append(Image(img_reader, width=220, height=66))
+                    import cairosvg  # noqa: F401
+                    cairosvg_available = True
+                except Exception:
+                    cairosvg_available = False
+                ext = candidate.suffix.lower()
+                if ext == '.svg' and cairosvg_available:
+                    import cairosvg
+                    from reportlab.platypus import Image
+                    from reportlab.lib.utils import ImageReader
+                    try:
+                        png_bytes = cairosvg.svg2png(url=str(candidate), output_width=300)
+                        img_reader = ImageReader(io.BytesIO(png_bytes))
+                        story.append(Image(img_reader, width=220, height=66))
+                        story.append(Spacer(1, 16))
+                        logo_diag['rendered'] = True
+                        svg_rendered_any = True
+                        logo_diag['in_memory'] = True
+                        break
+                    except Exception as _svg_e:
+                        # Try embedded raster extraction
+                        try:
+                            import re, base64 as _b64
+                            raw_svg = Path(candidate).read_text(encoding='utf-8', errors='ignore')
+                            m = re.search(r'data:image/(png|jpeg);base64,([A-Za-z0-9+/=]+)', raw_svg)
+                            if m:
+                                from reportlab.platypus import Image
+                                from reportlab.lib.utils import ImageReader
+                                bts = _b64.b64decode(m.group(2))
+                                img_reader = ImageReader(io.BytesIO(bts))
+                                story.append(Image(img_reader, width=220, height=66))
+                                story.append(Spacer(1, 16))
+                                logo_diag['rendered'] = True
+                                logo_diag['fallback_extracted_raster'] = True
+                                break
+                            else:
+                                logo_diag['error'] = f'svg_render_failed:{_svg_e!r}'
+                        except Exception as _fb_e:
+                            logo_diag['error'] = f'svg_render_failed:{_svg_e!r};fallback_err:{_fb_e!r}'
+                elif ext in ('.png', '.jpg', '.jpeg'):
+                    from reportlab.platypus import Image
+                    story.append(Image(str(candidate), width=220, height=66))
                     story.append(Spacer(1, 16))
                     logo_diag['rendered'] = True
-                    svg_rendered_any = True
-                    logo_diag['in_memory'] = True
-                except Exception as _svg_e:
-                    logo_diag['error'] = f'svg_render_failed:{_svg_e!r}'
-            elif chosen.suffix.lower() in ('.png', '.jpg', '.jpeg'):
-                from reportlab.platypus import Image
-                story.append(Image(str(chosen), width=220, height=66))
-                story.append(Spacer(1, 16))
-                logo_diag['rendered'] = True
-            else:
-                logo_diag['error'] = f'unsupported_or_missing_renderer(cairosvg_available={cairosvg_available})'
-        except Exception as _le:
-            logo_diag['error'] = repr(_le)
+                    break
+                else:
+                    if ext == '.svg' and not cairosvg_available:
+                        # Continue to next candidate (maybe a PNG later) without finalizing error yet
+                        logo_diag['error'] = 'cairo_missing_svg_skipped'
+                        continue
+                    # Unsupported format -> try next
+                    logo_diag['error'] = f'unsupported_format:{ext}'
+                    continue
+            except Exception as _le:
+                logo_diag['error'] = repr(_le)
+                continue
+        # If we exit loop without rendered True, error already captured.
     # If logo failed to render, insert a textual header spacer for consistent layout
     if not logo_diag.get('rendered'):
         story.append(Paragraph('<para align="left"><font size=16 color="#1f4e79"><b>LSI Graphics</b></font></para>', styles['Normal']))
