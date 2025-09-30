@@ -95,6 +95,8 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
     story = []
 
     logo_diag = {"attempted": False, "found": False, "rendered": False, "error": None, "candidates": []}
+    # Track whether any SVG was successfully rasterized (logo or other images)
+    svg_rendered_any = False
     candidates = [
         Path('assets') / 'LSI_Logo.svg',
         Path('LSI_Logo.svg'),
@@ -130,6 +132,7 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
                 story.append(Image(tmpf.name, width=220, height=66))
                 story.append(Spacer(1, 16))
                 logo_diag['rendered'] = True
+                svg_rendered_any = True
             elif chosen.suffix.lower() in ('.png', '.jpg', '.jpeg'):
                 from reportlab.platypus import Image
                 story.append(Image(str(chosen), width=220, height=66))
@@ -313,6 +316,7 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
     story.append(Paragraph('<font size=8 color="#555555">Prepared using the internal Sign Estimation Tool. Figures are for estimation purposes only.</font>', styles['Normal']))
 
     # Appendix pages for multi-images (basic stub): show additional images if provided in multi_image_lookup
+    appendix_count = 0
     if embed_images and multi_image_lookup:
         from reportlab.platypus import PageBreak, Image as RLImage
         for sign_name, paths in multi_image_lookup.items():
@@ -327,8 +331,13 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
                 try:
                     story.append(RLImage(str(thumbp), width=260, height=140))
                     story.append(Spacer(1, 6))
+                    if str(p).lower().endswith('.svg'):
+                        # We only know it's an SVG source; thumbnail builder may have used cairosvg.
+                        # Treat presence as evidence of svg rendering capability.
+                        svg_rendered_any = True
                 except Exception:
                     continue
+            appendix_count += 1
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     buf_local.seek(0)
     pdf_bytes = buf_local.read()
@@ -350,6 +359,10 @@ def generate_estimate_pdf(table_data: List[Dict[str, Any]], summary_text: str, t
         'head_signature': pdf_bytes[:8],
         'eof_present': b'%%EOF' in pdf_bytes[-1024:],
         'logo': logo_diag,
+        'embed_images': bool(embed_images),
+        'image_column': bool(embed_images),  # image column present when embed_images True
+        'appendix_count': appendix_count,
+        'svg_render_enabled': svg_rendered_any,
     }
     return pdf_bytes, diag
 

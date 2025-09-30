@@ -17,6 +17,11 @@ class OneDriveManager:
         self.onedrive_path = Path(onedrive_path) if onedrive_path else None
         self.config_file = self.local_path / "onedrive_config.json"
         self.load_config()
+        # Auto-detect OneDrive path on macOS if not provided
+        if self.onedrive_path is None:
+            autodetected = self._autodetect_onedrive_root()
+            if autodetected:
+                self.onedrive_path = autodetected
     
     def load_config(self):
         """Load OneDrive configuration from config file."""
@@ -121,6 +126,42 @@ class OneDriveManager:
                     json.dump(manifest, f, indent=2)
             except Exception:
                 pass
+
+    # -------------------- Platform helpers --------------------
+    @staticmethod
+    def _autodetect_onedrive_root():
+        """Attempt to detect a user's OneDrive root (supports Windows & macOS).
+
+        macOS patterns (depending on client and business vs personal):
+          ~/Library/CloudStorage/OneDrive-<OrgName>
+          ~/Library/CloudStorage/OneDrive-Personal
+          ~/OneDrive  (legacy / symlink)
+        Windows relies on environment vars (not handled here since usually configured already).
+        Returns Path or None.
+        """
+        try:
+            home = Path.home()
+            candidates = [
+                home / 'Library' / 'CloudStorage',  # will enumerate below
+                home / 'OneDrive'
+            ]
+            roots = []
+            for base in candidates:
+                if base.exists():
+                    # If base is CloudStorage, look for OneDrive-* subfolders
+                    if base.name == 'CloudStorage':
+                        for child in base.iterdir():
+                            if child.is_dir() and child.name.startswith('OneDrive'):
+                                roots.append(child)
+                    else:
+                        roots.append(base)
+            # Heuristic: pick first with an 'Documents' or 'Shared' directory
+            for r in roots:
+                if (r / 'Documents').exists() or (r / 'Shared').exists():
+                    return r
+            return roots[0] if roots else None
+        except Exception:
+            return None
 
     @staticmethod
     def _file_sha256(path: Path) -> str:

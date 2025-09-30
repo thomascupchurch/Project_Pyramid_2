@@ -365,52 +365,13 @@ def create_tree_visualization():
     levels = {}
     for n in nodes:
         levels.setdefault(n['level'], []).append(n)
-    # Weighted horizontal distribution for level 1 (buildings) based on number of descendant signs
-    pos = {}
-    x_gap = 260  # project to building horizontal gap
+    # Simple grid positioning: x by level, y by index
+    x_gap = 260
     y_gap = 46
-    # Count signs per building
-    building_sign_counts = {}
-    for b in levels.get(1, []):
-        cnt = sum(1 for n in levels.get(2, []) if n.get('parent') == b['id'])
-        building_sign_counts[b['id']] = max(1, cnt)
-    total_weight = sum(building_sign_counts.values()) or 1
-    # Determine total span for buildings proportional to sqrt of total signs to avoid extreme stretching
-    total_signs = sum(building_sign_counts.values())
-    base_unit = 140
-    building_count = len(levels.get(1, []))
-    span = max(300, base_unit * (building_count + 0.3 * max(0, total_signs - building_count)))
-    start_x = x_gap  # buildings start after project column
-    current_x = start_x
-    gap_between = 40
-    # Place project node at x=0, vertically centered later
-    for proj in levels.get(0, []):
-        pos[proj['id']] = (0, (len(levels.get(1, [])) * y_gap)/2 if levels.get(1) else 0)
-    # Assign building centers
-    for idx, b in enumerate(levels.get(1, [])):
-        weight = building_sign_counts.get(b['id'], 1)
-        width = (weight / total_weight) * (span - gap_between * max(0, building_count - 1))
-        center_x = current_x + width / 2
-        pos[b['id']] = (center_x, idx * y_gap)
-        current_x += width + gap_between
-    # Place sign nodes under their building using local spread
-    for b in levels.get(1, []):
-        signs = [n for n in levels.get(2, []) if n.get('parent') == b['id']]
-        if not signs:
-            continue
-        # Local horizontal fan centered under the building
-        b_x, b_y = pos[b['id']]
-        local_span = 110 * max(1, len(signs)-1)
-        s_start = b_x - local_span/2
-        step = local_span / (len(signs)-1) if len(signs) > 1 else 0
-        for j, s in enumerate(signs):
-            pos[s['id']] = (s_start + j * step, b_y + y_gap)
-    # Ensure any remaining nodes (unlikely extra levels) get default grid placement
+    pos = {}
     for level, lvl_nodes in levels.items():
-        if level in (0,1,2):
-            continue
         for i, n in enumerate(lvl_nodes):
-            pos.setdefault(n['id'], (level * x_gap, i * y_gap))
+            pos[n['id']] = (level * x_gap, i * y_gap)
 
     # Pre-fetch sign type details for fast lookup
     conn = sqlite3.connect(DATABASE_PATH)
@@ -427,7 +388,7 @@ def create_tree_visualization():
     edge_y = []
     for n in nodes:
         parent = n.get('parent')
-        if parent and parent in pos and n['id'] in pos:
+        if parent and parent in pos:
             x0, y0 = pos[parent]; x1, y1 = pos[n['id']]
             edge_x += [x0, x1, None]
             edge_y += [y0, y1, None]
@@ -475,8 +436,8 @@ def create_tree_visualization():
                         "Unit Price: $%{customdata[3]}  $/SqFt: %{customdata[4]}  Mult: %{customdata[5]}<extra></extra>"
                     )
         fig.add_trace(go.Scatter(
-            x=[pos.get(n['id'], (0,0))[0] for n in lvl_nodes],
-            y=[pos.get(n['id'], (0,0))[1] for n in lvl_nodes],
+            x=[pos[n['id']][0] for n in lvl_nodes],
+            y=[pos[n['id']][1] for n in lvl_nodes],
             mode='markers+text',
             marker=dict(size=15, color=[color_map.get(n['type'], '#4a90e2') for n in lvl_nodes]),
             text=texts,
@@ -2581,11 +2542,44 @@ def export_estimate_pdf(n_clicks, table_data, summary_children, pdf_title, disab
                 disable_logo = False
         else:
             disable_logo = bool(_os.environ.get('ESTIMATE_PDF_DISABLE_LOGO'))
-        pdf_bytes, diag = generate_estimate_pdf(table_data, summary_text, pdf_title, str(DATABASE_PATH), disable_logo=disable_logo)
+        # Build multi-image lookup: sign_name -> ordered list of image paths (cover first)
+        multi_lookup = {}
+        try:
+            import sqlite3 as _sqlite
+            conn = _sqlite.connect(DATABASE_PATH)
+            cur = conn.cursor()
+            # For all distinct sign Items in the table (strip any 'Group:' prefix and quantity suffix)
+            item_names = set()
+            for r in table_data:
+                raw_item = str(r.get('Item') or '').strip()
+                if not raw_item:
+                    continue
+                base_item = raw_item.split('Group:')[-1].strip() if raw_item.startswith('Group:') else raw_item
+                # Remove trailing quantity pattern e.g., "(3)" only if at end
+                import re as _re2
+                cleaned = _re2.sub(r'\(\d+\)$','', base_item).strip()
+                if cleaned:
+                    item_names.add(cleaned)
+            # Query once per name (could optimize with join) preserving display_order
+            for name in item_names:
+                try:
+                    cur.execute('''SELECT sti.image_path FROM sign_type_images sti 
+                                   JOIN sign_types st ON st.id=sti.sign_type_id 
+                                   WHERE st.name=? ORDER BY sti.display_order ASC, sti.id ASC''', (name,))
+                    rows = [r[0] for r in cur.fetchall() if r and r[0]]
+                    existing = [p for p in rows if os.path.exists(p)]
+                    if existing:
+                        multi_lookup[name] = existing
+                except Exception:
+                    continue
+            conn.close()
+        except Exception as _mle:
+            print(f"[pdf][multi-image][warn] {_mle}")
+        pdf_bytes, diag = generate_estimate_pdf(table_data, summary_text, pdf_title, str(DATABASE_PATH), disable_logo=disable_logo, multi_image_lookup=multi_lookup)
         sig = diag.get('head_signature')
         eof_present = diag.get('eof_present')
         logo_diag = diag.get('logo', {})
-        print(f"[pdf][diag] size={diag.get('size')} sig={sig!r} eof={eof_present} sha1={diag.get('sha1')[:10]} rows={diag.get('row_count')} ext={diag.get('exterior_count')} int={diag.get('interior_count')} logo={logo_diag}")
+        print(f"[pdf][diag] size={diag.get('size')} sig={sig!r} eof={eof_present} sha1={diag.get('sha1')[:10]} rows={diag.get('row_count')} ext={diag.get('exterior_count')} int={diag.get('interior_count')} logo={logo_diag} embed={diag.get('embed_images')} appendix={diag.get('appendix_count')}")
         if not (isinstance(sig, (bytes, bytearray)) and sig.startswith(b'%PDF') and eof_present):
             print('[pdf][diag][warn] signature or EOF missing, raising for fallback')
             raise ValueError('Generated PDF failed validation')

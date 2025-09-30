@@ -136,6 +136,38 @@ Planned (optional) future expansions: multiple images per sign, export embedding
 | ONEDRIVE_SYNC_DIR     | Path to OneDrive sync folder (autosync) | (unset)            |
 | ONEDRIVE_AUTOSYNC_SEC | Autosync interval seconds               | 300                |
 | SIGN_APP_CACHE_DIR    | Alternate cache/temp path               | per-user cache     |
+| CAIROSVG_BACKEND      | Force cairosvg backend (e.g. pycairo)    | (unset)            |
+| DISABLE_SVG_RENDER    | Skip SVG rasterization (fallback header) | 0                  |
+
+### SVG Rendering (Cairo) on Windows
+
+The PDF export attempts to rasterize SVG logos and sign images via `cairosvg`. On Windows this requires Cairo native DLLs. If they are missing you will see warnings in `scripts/verify_env.py` like:
+
+```
+[MISSING] cairosvg: no library called "cairo-2" was found
+```
+
+Options to enable SVG rendering:
+
+1. Install pycairo (already in requirements or: `pip install pycairo`).  
+2. Provide native Cairo DLLs via a GTK runtime or MSYS2 and add their `bin` directory to `PATH`.  
+3. Drop required DLLs (e.g. `libcairo-2.dll`, `libpng16-16.dll`, `zlib1.dll`, `libpixman-1-0.dll`, `libfreetype-6.dll`) into a local `cairo_runtime/` folder at the project root; the PowerShell launcher `start_app.ps1` will prepend that folder to `PATH` automatically.
+
+Environment helpers:
+
+| Variable | Effect |
+| -------- | ------ |
+| `CAIROSVG_BACKEND=pycairo` | Prefer the pycairo backend; helps when cairocffi cannot locate DLLs. |
+| `DISABLE_SVG_RENDER=1` | Bypass SVG → PNG conversion; PDF uses text fallback header and existing raster images only. |
+
+Diagnostic script:
+
+```
+python scripts/verify_env.py
+```
+
+Will report either `[OK] cairosvg functional render test` or a warning plus remediation guidance. This allows deployments to proceed even if SVG rendering is degraded.
+
 
 ### Security Note
 

@@ -96,6 +96,24 @@ Write-Host "Port       : $Port"
 Write-Host "Working Dir: $ScriptDir"
 Write-Host "--------------------------------------------" -ForegroundColor Cyan
 
+# --- Optional Cairo runtime injection (for cairosvg SVG->PNG support) ---
+$cairoRuntime = Join-Path $ScriptDir 'cairo_runtime'
+if (Test-Path $cairoRuntime) {
+  if (-not ($env:PATH.Split(';') -contains $cairoRuntime)) {
+    $env:PATH = "$cairoRuntime;$env:PATH"
+    Write-Host "[cairo] Prepended $cairoRuntime to PATH" -ForegroundColor DarkCyan
+  } else {
+    Write-Host "[cairo] Runtime path already in PATH" -ForegroundColor DarkCyan
+  }
+} else {
+  Write-Host "[cairo] No local cairo_runtime directory (skipping)" -ForegroundColor DarkGray
+}
+
+# Prefer pycairo backend if present; can help on Windows when cairocffi DLL lookup fails
+if (-not $env:CAIROSVG_BACKEND) { $env:CAIROSVG_BACKEND = 'pycairo' }
+# To disable SVG rendering entirely (fallback to text/logo PNG), uncomment:
+# $env:DISABLE_SVG_RENDER = '1'
+
 # Pass env vars through for the app to consume
 $env:SIGN_APP_PORT = $Port
 $env:SIGN_APP_DB = $Database
