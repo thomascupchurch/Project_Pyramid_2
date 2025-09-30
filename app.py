@@ -192,6 +192,9 @@ app.layout = html.Div([
         ], style={'display':'flex','alignItems':'center','gap':'6px'})
     ], color='dark', dark=True, className='mb-2 py-1'),
     dcc.Tabs(id='main-tabs', value='tab_projects', children=role_guarded_tabs('viewer')),
+    # Global interval to auto-refresh shared dropdown option sets (projects, profiles, templates, buildings)
+    # 5 minutes (300000 ms) by default; override via env SIGN_APP_DROPDOWN_REFRESH_MS
+    dcc.Interval(id='global-dropdown-refresh', interval=int(os.getenv('SIGN_APP_DROPDOWN_REFRESH_MS','300000')), n_intervals=0),
     html.Div(id='tab-content')
 ])
 
@@ -273,6 +276,14 @@ def render_tab(active_tab, role):
         return html.Div([
             html.H4('Bid Templates'),
             dbc.Row([
+                dbc.Col([
+                    dbc.Label('Ordering'),
+                    dcc.RadioItems(id='template-order-mode', options=[
+                        {'label':'Newest','value':'new'}, {'label':'A→Z','value':'alpha'}
+                    ], value='new', inline=True, className='small')
+                ], md=3)
+            ], className='g-2 mb-1'),
+            dbc.Row([
                 dbc.Col([dbc.Label('Template Name'), dbc.Input(id='template-name', placeholder='Template name')], md=3),
                 dbc.Col([dbc.Label('Description'), dbc.Input(id='template-desc', placeholder='Description')], md=4),
                 dbc.Col(dbc.Button('Create Template', id='create-template-btn', color='primary', className='mt-4 w-100'), md=2),
@@ -324,9 +335,21 @@ def render_tab(active_tab, role):
             html.H4('Pricing Profiles'),
             dbc.Row([
                 dbc.Col([dbc.Label('Profile Name'), dbc.Input(id='pp-name', placeholder='Profile name')], md=3),
-                dbc.Col([dbc.Label('Sales Tax Rate (%)'), dbc.Input(id='pp-tax', type='number', value=0)], md=2),
-                dbc.Col([dbc.Label('Installation Rate (%)'), dbc.Input(id='pp-install', type='number', value=0)], md=2),
-                dbc.Col([dbc.Label('Margin Multiplier'), dbc.Input(id='pp-margin', type='number', value=1.0, step=0.01)], md=2),
+                dbc.Col([
+                    dbc.Label('Sales Tax Rate (%)'),
+                    dbc.Input(id='pp-tax', type='number', value=0),
+                    html.Small('Percent applied to taxable subtotal. Example: 7.5 = 7.5% tax.', className='text-muted d-block')
+                ], md=2),
+                dbc.Col([
+                    dbc.Label('Installation Rate (%)'),
+                    dbc.Input(id='pp-install', type='number', value=0),
+                    html.Small('Percent of (subtotal) added as install when using percent install mode.', className='text-muted d-block')
+                ], md=2),
+                dbc.Col([
+                    dbc.Label('Margin Multiplier'),
+                    dbc.Input(id='pp-margin', type='number', value=1.0, step=0.01),
+                    html.Small('Applied after base cost: final = subtotal * margin. 1.20 = 20% margin uplift.', className='text-muted d-block')
+                ], md=2),
                 dbc.Col(dbc.Checklist(id='pp-default', options=[{'label':'Default','value':'d'}], value=[], className='mt-4'), md=1),
                 dbc.Col(dbc.Button('Create Profile', id='pp-create-btn', color='primary', className='mt-4 w-100'), md=2)
             ], className='g-2'),
@@ -513,6 +536,27 @@ def apply_template(n, template_id, building_id):
     except Exception as e:
         return dbc.Alert(f'Error: {e}', color='danger')
 
+# --------------- Dependent Building Options (Template Apply) --------------- #
+@app.callback(
+    Output('apply-building-id','options'),
+    Output('apply-building-id','disabled'),
+    Input('apply-project-id','value'),
+    Input('global-dropdown-refresh','n_intervals'),
+    prevent_initial_call=False
+)
+def filter_buildings_for_apply(project_id, _):
+    try:
+        if not project_id:
+            return [], True
+        conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+        cur.execute('SELECT id, name FROM buildings WHERE project_id=? ORDER BY name', (int(project_id),))
+        opts = [{'label': r[1], 'value': r[0]} for r in cur.fetchall()]
+        conn.close()
+        return opts, False
+    except Exception as e:
+        print(f"[apply-building-filter][error] {e}")
+        return [], True
+
 # ------------------- Tags Callbacks ------------------- #
 @app.callback(
     Output('tag-feedback','children'),
@@ -650,16 +694,21 @@ def toggle_note_include(n, note_id):
     Input('create-template-btn','n_clicks'),
     Input('refresh-templates-btn','n_clicks'),
     Input('create-snapshot-btn','n_clicks'),
-    prevent_initial_call=True
+    Input('global-dropdown-refresh','n_intervals'),
+    State('template-order-mode','value'),
+    prevent_initial_call=False
 )
-def refresh_dropdown_options(*_):
+def refresh_dropdown_options(_, __, ___, ____, _____, ______, template_order_mode):
     try:
         conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
         cur.execute('SELECT id, name FROM projects ORDER BY name')
         projects = [{'label':r[1], 'value': r[0]} for r in cur.fetchall()]
         cur.execute('SELECT id, name FROM pricing_profiles ORDER BY name')
         profiles = [{'label':r[1], 'value': r[0]} for r in cur.fetchall()]
-        cur.execute('SELECT id, name FROM bid_templates ORDER BY created_at DESC')
+        if template_order_mode == 'alpha':
+            cur.execute('SELECT id, name FROM bid_templates ORDER BY lower(name) ASC')
+        else:
+            cur.execute('SELECT id, name FROM bid_templates ORDER BY created_at DESC')
         templates = [{'label':r[1], 'value': r[0]} for r in cur.fetchall()]
         cur.execute('SELECT id, name, project_id FROM buildings ORDER BY name')
         buildings = [{'label':f"{r[1]} (P{r[2]})", 'value': r[0]} for r in cur.fetchall()]
