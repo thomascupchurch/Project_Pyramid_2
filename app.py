@@ -238,6 +238,7 @@ def toggle_note_include(n, note_id):
         return dbc.Alert(f'Error: {e}', color='danger')
 
 # ------------------- Dropdown Options Refresh ------------------- #
+from dash.dependencies import ALL
 @app.callback(
     Output('snap-project-id','options'),
     Output('pp-project-id','options'),
@@ -245,16 +246,12 @@ def toggle_note_include(n, note_id):
     Output('pp-default-id','options'),
     Output('template-id-item','options'),
     Output('apply-template-id','options'),
-    Input('pp-create-btn','n_clicks'),
-    Input('pp-refresh-btn','n_clicks'),
-    Input('create-template-btn','n_clicks'),
-    Input('refresh-templates-btn','n_clicks'),
-    Input('create-snapshot-btn','n_clicks'),
+    Input({'kind':ALL,'action':ALL}, 'n_clicks'),
     Input('global-dropdown-refresh','n_intervals'),
     State('template-order-mode','value'),
     prevent_initial_call=False
 )
-def refresh_dropdown_options(_, __, ___, ____, _____, ______, template_order_mode):
+def refresh_dropdown_options(_pattern_clicks, _interval, template_order_mode):
     try:
         conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
         cur.execute('SELECT id, name FROM projects ORDER BY name')
@@ -278,8 +275,7 @@ def refresh_dropdown_options(_, __, ___, ____, _____, ______, template_order_mod
 @app.callback(
     Output('pp-create-feedback','children'),
     Output('pp-table','data'),
-    Input('pp-create-btn','n_clicks'),
-    Input('pp-refresh-btn','n_clicks'),
+    Input({'kind':'pp','action':ALL}, 'n_clicks'),
     State('pp-name','value'),
     State('pp-tax','value'),
     State('pp-install','value'),
@@ -287,10 +283,19 @@ def refresh_dropdown_options(_, __, ___, ____, _____, ______, template_order_mod
     State('pp-default','value'),
     prevent_initial_call=True
 )
-def handle_pricing_profiles(create_clicks, refresh_clicks, name, tax, install, margin, default_values):
-    triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
+def handle_pricing_profiles(pp_clicks, name, tax, install, margin, default_values):
+    # Determine which button fired
+    triggered_actions = []
+    if callback_context.triggered:
+        for t in callback_context.triggered:
+            try:
+                tid = eval(t['prop_id'].split('.')[0])  # pattern IDs are serialized as dict strings
+                if isinstance(tid, dict) and tid.get('kind')=='pp':
+                    triggered_actions.append(tid.get('action'))
+            except Exception:
+                continue
     msg = dash.no_update
-    if 'pp-create-btn' in triggered:
+    if 'create' in triggered_actions:
         if not name:
             return dbc.Alert('Profile name required', color='danger'), dash.no_update
         try:
@@ -461,7 +466,10 @@ def build_tabs_for_role(role: str):
     return tabs
 # App layout
 app.layout = dbc.Container([
+    # Store for current role (session) and persisted last-used role (local)
     dcc.Store(id='current-role', storage_type='session'),
+    dcc.Store(id='persisted-role', storage_type='local'),
+    dcc.Store(id='persisted-active-tab', storage_type='local'),
     # Header with role selector
     dbc.Row([
         dbc.Col([
@@ -503,14 +511,65 @@ app.layout = dbc.Container([
 ], fluid=True, className='d-flex flex-column min-vh-100')
 
 @app.callback(
-    Output('current-role','data'),
-    Output('main-tabs','children'),
-    Input('role-selector','value'),
+    Output('role-selector','value'),            # ensure dropdown reflects restored/changed role
+    Output('current-role','data'),              # session-scoped current role
+    Output('main-tabs','children'),             # tabs for role
+    Output('main-tabs','active_tab'),           # active tab (restored or first valid)
+    Output('persisted-role','data'),            # update persisted role on change
+    Input('role-selector','value'),             # user changing role OR default initial value
+    State('persisted-role','data'),             # previously persisted role
+    State('persisted-active-tab','data'),       # previously persisted active tab
     prevent_initial_call=False
 )
-def update_role_tabs(role_value):
-    tabs = build_tabs_for_role(role_value)
-    return role_value, tabs
+def update_role_and_tabs(current_role_value, persisted_role, persisted_tab):
+    """Unified bootstrap + role change handler.
+
+    Logic:
+    1. On first page load Dash will call with current_role_value = default ('viewer') and persisted states available.
+       We prefer persisted role if present.
+    2. Build tabs for the resolved role.
+    3. Restore active tab if persisted and still valid for this role; else first tab id.
+    4. When user manually changes role, persisted_role is used only for comparison; active tab resets to first unless previously persisted tab still valid.
+    5. Persist the resolved role each invocation.
+    """
+    # Determine role to use (persisted overrides initial default if different and valid)
+    resolved_role = current_role_value or 'viewer'
+    if persisted_role and isinstance(persisted_role, dict):
+        pr = persisted_role.get('role')
+        if pr in {r['value'] for r in ROLE_OPTIONS} and pr != current_role_value and callback_context.triggered and 'role-selector' in callback_context.triggered[0]['prop_id']:
+            # User actively changed role; keep selection not persisted override
+            pass
+        elif pr in {r['value'] for r in ROLE_OPTIONS} and (not callback_context.triggered or 'role-selector' not in callback_context.triggered[0]['prop_id']):
+            # Initial load path: override with persisted
+            resolved_role = pr
+    tabs = build_tabs_for_role(resolved_role)
+    tab_ids = [t.tab_id for t in tabs]
+    # Determine desired active tab
+    desired_tab = None
+    if persisted_tab and isinstance(persisted_tab, dict):
+        pt = persisted_tab.get('active_tab')
+        if pt in tab_ids:
+            desired_tab = pt
+    # If user just changed the role (trigger from role-selector) and persisted tab invalid, fallback to first
+    if not desired_tab:
+        desired_tab = tab_ids[0] if tab_ids else None
+    return resolved_role, resolved_role, tabs, desired_tab, {'role': resolved_role}
+
+# Restore active tab on load once tabs are present
+# We no longer need a separate restore_active_tab; init_role_and_tab handles both early.
+
+# Persist active tab when user switches
+@app.callback(
+    Output('persisted-active-tab','data'),
+    Input('main-tabs','active_tab'),
+    prevent_initial_call=False
+)
+def persist_active_tab(active_tab):
+    if not active_tab:
+        raise PreventUpdate
+    return {'active_tab': active_tab}
+
+# If there is no persisted active tab yet when tabs first render, the above will save the default
 
 def render_pricing_profiles_tab():
     return html.Div([
@@ -533,7 +592,7 @@ def render_pricing_profiles_tab():
                 html.Small('Final total multiplier: subtotal * margin.', className='text-muted d-block')
             ], md=2),
             dbc.Col(dbc.Checklist(id='pp-default', options=[{'label':'Default','value':'d'}], value=[], className='mt-4'), md=1),
-            dbc.Col(dbc.Button('Create Profile', id='pp-create-btn', color='primary', className='mt-4 w-100'), md=2)
+            dbc.Col(dbc.Button('Create Profile', id={'kind':'pp','action':'create'}, color='primary', className='mt-4 w-100'), md=2)
         ], className='g-2'),
         html.Div(id='pp-create-feedback', className='mt-2'),
         html.Hr(),
@@ -561,7 +620,7 @@ def render_pricing_profiles_tab():
                 ], className='g-2'),
                 html.Div(id='pp-default-feedback', className='mt-2'),
                 html.Hr(),
-                dbc.Button('Refresh Profiles', id='pp-refresh-btn', color='secondary', className='mt-2')
+                dbc.Button('Refresh Profiles', id={'kind':'pp','action':'refresh'}, color='secondary', className='mt-2')
             ], md=6)
         ])
     ], style={'padding':'16px'})
@@ -572,7 +631,7 @@ def render_snapshots_tab():
         dbc.Row([
             dbc.Col([dbc.Label('Project'), dcc.Dropdown(id='snap-project-id', placeholder='Select project')], md=3),
             dbc.Col([dbc.Label('Label (optional)'), dbc.Input(id='snap-label', placeholder='Snapshot label')], md=3),
-            dbc.Col(dbc.Button('Create Snapshot', id='create-snapshot-btn', color='primary', className='mt-4 w-100'), md=2),
+            dbc.Col(dbc.Button('Create Snapshot', id={'kind':'snapshot','action':'create'}, color='primary', className='mt-4 w-100'), md=2),
             dbc.Col(dbc.Button('Refresh List', id='refresh-snapshots-btn', color='secondary', className='mt-4 w-100'), md=2)
         ], className='g-2'),
         html.Div(id='snapshot-create-feedback', className='mt-2'),
@@ -608,8 +667,8 @@ def render_templates_tab():
         dbc.Row([
             dbc.Col([dbc.Label('Template Name'), dbc.Input(id='template-name', placeholder='Template name')], md=3),
             dbc.Col([dbc.Label('Description'), dbc.Input(id='template-desc', placeholder='Description')], md=4),
-            dbc.Col(dbc.Button('Create Template', id='create-template-btn', color='primary', className='mt-4 w-100'), md=2),
-            dbc.Col(dbc.Button('Refresh', id='refresh-templates-btn', color='secondary', className='mt-4 w-100'), md=2)
+            dbc.Col(dbc.Button('Create Template', id={'kind':'template','action':'create'}, color='primary', className='mt-4 w-100'), md=2),
+            dbc.Col(dbc.Button('Refresh', id={'kind':'template','action':'refresh'}, color='secondary', className='mt-4 w-100'), md=2)
         ], className='g-2'),
         html.Div(id='template-create-feedback', className='mt-2'),
         html.Hr(),

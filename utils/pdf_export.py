@@ -175,7 +175,20 @@ def generate_estimate_pdf(
                     try:
                         png_bytes = cairosvg.svg2png(url=str(candidate), output_width=300)
                         img_reader = ImageReader(io.BytesIO(png_bytes))
-                        story.append(Image(img_reader, width=220, height=66))
+                        # Determine original intrinsic size
+                        try:
+                            from PIL import Image as _PILImage
+                            _pil_im = _PILImage.open(io.BytesIO(png_bytes))
+                            orig_w, orig_h = _pil_im.size
+                        except Exception:
+                            orig_w, orig_h = (300, 90)
+                        # Maintain aspect ratio within max box
+                        max_w, max_h = 300, 90
+                        scale = min(max_w / orig_w, max_h / orig_h)
+                        disp_w, disp_h = orig_w * scale, orig_h * scale
+                        story.append(Image(img_reader, width=disp_w, height=disp_h))
+                        logo_diag['scaled_width'] = disp_w
+                        logo_diag['scaled_height'] = disp_h
                         story.append(Spacer(1, 16))
                         logo_diag['rendered'] = True
                         svg_rendered_any = True
@@ -192,7 +205,19 @@ def generate_estimate_pdf(
                                 from reportlab.lib.utils import ImageReader
                                 bts = _b64.b64decode(m.group(2))
                                 img_reader = ImageReader(io.BytesIO(bts))
-                                story.append(Image(img_reader, width=220, height=66))
+                                # Use same proportional scaling for embedded raster
+                                try:
+                                    from PIL import Image as _PILImage
+                                    _pil_im = _PILImage.open(io.BytesIO(bts))
+                                    orig_w, orig_h = _pil_im.size
+                                except Exception:
+                                    orig_w, orig_h = (300, 90)
+                                max_w, max_h = 300, 90
+                                scale = min(max_w / orig_w, max_h / orig_h)
+                                disp_w, disp_h = orig_w * scale, orig_h * scale
+                                story.append(Image(img_reader, width=disp_w, height=disp_h))
+                                logo_diag['scaled_width'] = disp_w
+                                logo_diag['scaled_height'] = disp_h
                                 story.append(Spacer(1, 16))
                                 logo_diag['rendered'] = True
                                 logo_diag['fallback_extracted_raster'] = True
@@ -203,7 +228,19 @@ def generate_estimate_pdf(
                             logo_diag['error'] = f'svg_render_failed:{_svg_e!r};fallback_err:{_fb_e!r}'
                 elif ext in ('.png', '.jpg', '.jpeg'):
                     from reportlab.platypus import Image
-                    story.append(Image(str(candidate), width=220, height=66))
+                    # Proportional scaling for raster file on disk
+                    try:
+                        from PIL import Image as _PILImage
+                        _pil_im = _PILImage.open(str(candidate))
+                        orig_w, orig_h = _pil_im.size
+                    except Exception:
+                        orig_w, orig_h = (300, 90)
+                    max_w, max_h = 300, 90
+                    scale = min(max_w / orig_w, max_h / orig_h)
+                    disp_w, disp_h = orig_w * scale, orig_h * scale
+                    story.append(Image(str(candidate), width=disp_w, height=disp_h))
+                    logo_diag['scaled_width'] = disp_w
+                    logo_diag['scaled_height'] = disp_h
                     story.append(Spacer(1, 16))
                     logo_diag['rendered'] = True
                     break
