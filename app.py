@@ -14,7 +14,7 @@ import plotly.express as px
 import dash_cytoscape as cyto
 import pandas as pd
 import sqlite3
-from datetime import datetime
+from datetime import datetime, timezone
 import base64
 import io
 import json
@@ -365,13 +365,52 @@ def create_tree_visualization():
     levels = {}
     for n in nodes:
         levels.setdefault(n['level'], []).append(n)
-    # Compute positions
-    x_gap = 260
-    y_gap = 46
+    # Weighted horizontal distribution for level 1 (buildings) based on number of descendant signs
     pos = {}
+    x_gap = 260  # project to building horizontal gap
+    y_gap = 46
+    # Count signs per building
+    building_sign_counts = {}
+    for b in levels.get(1, []):
+        cnt = sum(1 for n in levels.get(2, []) if n.get('parent') == b['id'])
+        building_sign_counts[b['id']] = max(1, cnt)
+    total_weight = sum(building_sign_counts.values()) or 1
+    # Determine total span for buildings proportional to sqrt of total signs to avoid extreme stretching
+    total_signs = sum(building_sign_counts.values())
+    base_unit = 140
+    building_count = len(levels.get(1, []))
+    span = max(300, base_unit * (building_count + 0.3 * max(0, total_signs - building_count)))
+    start_x = x_gap  # buildings start after project column
+    current_x = start_x
+    gap_between = 40
+    # Place project node at x=0, vertically centered later
+    for proj in levels.get(0, []):
+        pos[proj['id']] = (0, (len(levels.get(1, [])) * y_gap)/2 if levels.get(1) else 0)
+    # Assign building centers
+    for idx, b in enumerate(levels.get(1, [])):
+        weight = building_sign_counts.get(b['id'], 1)
+        width = (weight / total_weight) * (span - gap_between * max(0, building_count - 1))
+        center_x = current_x + width / 2
+        pos[b['id']] = (center_x, idx * y_gap)
+        current_x += width + gap_between
+    # Place sign nodes under their building using local spread
+    for b in levels.get(1, []):
+        signs = [n for n in levels.get(2, []) if n.get('parent') == b['id']]
+        if not signs:
+            continue
+        # Local horizontal fan centered under the building
+        b_x, b_y = pos[b['id']]
+        local_span = 110 * max(1, len(signs)-1)
+        s_start = b_x - local_span/2
+        step = local_span / (len(signs)-1) if len(signs) > 1 else 0
+        for j, s in enumerate(signs):
+            pos[s['id']] = (s_start + j * step, b_y + y_gap)
+    # Ensure any remaining nodes (unlikely extra levels) get default grid placement
     for level, lvl_nodes in levels.items():
+        if level in (0,1,2):
+            continue
         for i, n in enumerate(lvl_nodes):
-            pos[n['id']] = (level * x_gap, i * y_gap)
+            pos.setdefault(n['id'], (level * x_gap, i * y_gap))
 
     # Pre-fetch sign type details for fast lookup
     conn = sqlite3.connect(DATABASE_PATH)
@@ -388,7 +427,7 @@ def create_tree_visualization():
     edge_y = []
     for n in nodes:
         parent = n.get('parent')
-        if parent and parent in pos:
+        if parent and parent in pos and n['id'] in pos:
             x0, y0 = pos[parent]; x1, y1 = pos[n['id']]
             edge_x += [x0, x1, None]
             edge_y += [y0, y1, None]
@@ -436,8 +475,8 @@ def create_tree_visualization():
                         "Unit Price: $%{customdata[3]}  $/SqFt: %{customdata[4]}  Mult: %{customdata[5]}<extra></extra>"
                     )
         fig.add_trace(go.Scatter(
-            x=[pos[n['id']][0] for n in lvl_nodes],
-            y=[pos[n['id']][1] for n in lvl_nodes],
+            x=[pos.get(n['id'], (0,0))[0] for n in lvl_nodes],
+            y=[pos.get(n['id'], (0,0))[1] for n in lvl_nodes],
             mode='markers+text',
             marker=dict(size=15, color=[color_map.get(n['type'], '#4a90e2') for n in lvl_nodes]),
             text=texts,
@@ -1131,9 +1170,19 @@ def render_estimates_tab():
                                 className='mt-4',
                                 switch=True
                             )
+                        ], md=2),
+                        dbc.Col([
+                            dbc.Checklist(
+                                id='disable-logo-toggle',
+                                options=[{'label':'No Logo','value':'no_logo'}],
+                                value=[],
+                                className='mt-4',
+                                switch=True
+                            )
                         ], md=2)
                     ], className='mb-3 g-2'),
                     dcc.Store(id='embed-images-store', data={'embed': True}),
+                    dcc.Store(id='disable-logo-store', data={'disable': False}),
                     dbc.Accordion([
                         dbc.AccordionItem([
                             dbc.Row([
@@ -2042,8 +2091,8 @@ def _get_db_timestamp() -> tuple[str, str]:
     try:
         if DATABASE_PATH and os.path.exists(DATABASE_PATH):
             ts = os.path.getmtime(DATABASE_PATH)
-            dt = datetime.utcfromtimestamp(ts)
-            rel = _humanize_delta((datetime.utcnow() - dt).total_seconds())
+            dt = datetime.fromtimestamp(ts, timezone.utc)
+            rel = _humanize_delta((datetime.now(timezone.utc) - dt).total_seconds())
             return rel, dt.isoformat() + 'Z'
     except Exception:
         pass
@@ -2064,9 +2113,9 @@ def _get_code_timestamp() -> tuple[str, str]:
                     try:
                         dt = datetime.fromisoformat(ts_txt)
                     except Exception:
-                        dt = datetime.utcnow()
+                        dt = datetime.now(timezone.utc)
                     # Assume provided timestamp is UTC
-                    rel = _humanize_delta((datetime.utcnow() - dt).total_seconds())
+                    rel = _humanize_delta((datetime.now(timezone.utc) - dt).total_seconds())
                     return rel, (dt.isoformat() + 'Z')
             except Exception:
                 pass
@@ -2083,8 +2132,8 @@ def _get_code_timestamp() -> tuple[str, str]:
                         candidates.append(child.stat().st_mtime)
         if candidates:
             ts = max(candidates)
-            dt = datetime.utcfromtimestamp(ts)
-            rel = _humanize_delta((datetime.utcnow() - dt).total_seconds())
+            dt = datetime.fromtimestamp(ts, timezone.utc)
+            rel = _humanize_delta((datetime.now(timezone.utc) - dt).total_seconds())
             return rel, dt.isoformat() + 'Z'
     except Exception:
         pass
@@ -2489,9 +2538,11 @@ def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode,
     State('estimate-table','data'),
     State('estimate-summary','children'),
     State('estimate-pdf-title','value'),
+    State('disable-logo-toggle','value'),
+    State('disable-logo-store','data'),
     prevent_initial_call=True
 )
-def export_estimate_pdf(n_clicks, table_data, summary_children, pdf_title):
+def export_estimate_pdf(n_clicks, table_data, summary_children, pdf_title, disable_logo_toggle, disable_logo_store):
     if not n_clicks:
         raise PreventUpdate
     if not table_data:
@@ -2520,7 +2571,16 @@ def export_estimate_pdf(n_clicks, table_data, summary_children, pdf_title):
         from utils.pdf_export import generate_estimate_pdf
         from dash import dcc
         import os as _os
-        disable_logo = bool(_os.environ.get('ESTIMATE_PDF_DISABLE_LOGO'))
+        # precedence: explicit toggle > store > env var
+        if disable_logo_toggle:
+            disable_logo = 'no_logo' in disable_logo_toggle
+        elif disable_logo_store:
+            try:
+                disable_logo = bool(disable_logo_store.get('disable'))
+            except Exception:
+                disable_logo = False
+        else:
+            disable_logo = bool(_os.environ.get('ESTIMATE_PDF_DISABLE_LOGO'))
         pdf_bytes, diag = generate_estimate_pdf(table_data, summary_text, pdf_title, str(DATABASE_PATH), disable_logo=disable_logo)
         sig = diag.get('head_signature')
         eof_present = diag.get('eof_present')

@@ -16,7 +16,7 @@ Usage:
 from __future__ import annotations
 import argparse, json, os, sys, time
 from pathlib import Path
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 OK = "OK"
 WARN = "WARN"
@@ -40,7 +40,7 @@ def main():
 
     summary = {
         'root': str(root),
-        'timestamp': datetime.utcnow().isoformat() + 'Z',
+        'timestamp': datetime.now(timezone.utc).isoformat().replace('+00:00','Z'),
         'checks': {}
     }
 
@@ -83,7 +83,9 @@ def main():
             if ts:
                 try:
                     dt = datetime.fromisoformat(ts.replace('Z',''))
-                    fresh = datetime.now() - dt < timedelta(days=1)
+                    if dt.tzinfo is None:
+                        dt = dt.replace(tzinfo=timezone.utc)
+                    fresh = datetime.now(timezone.utc) - dt < timedelta(days=1)
                 except Exception:
                     pass
             summary['checks']['deployment_info'] = {'exists': True, 'fresh': fresh}
