@@ -194,3 +194,68 @@ python scripts/deploy.py --setup-only
 
 ---
 **Last Updated:** Added backup/retention, log aggregation, pruning, archiving, helper deploy scripts, and concurrency guidance.
+
+---
+## 10. Cross-Platform Virtual Environment Pitfalls (Important)
+
+If you copy this repository (including the `.venv/` folder) between macOS and Windows, the virtual environment metadata will still point to the original OS interpreter. Symptoms:
+
+- Running `pytest` or `python scripts/deploy.py --bundle` fails with a path like `/Users/Name/miniconda3/bin/python.exe` (mixed forward/back slashes) or `C:\...\python.exe` on mac.
+- `pyvenv.cfg` inside `.venv/` shows a `home =` path for the other operating system.
+- Exports / PyInstaller builds fail immediately before any app code runs.
+
+### Detecting the Problem
+1. Run: `python scripts/verify_env.py --json`
+2. Look for: `"venv_mismatch": true` in the JSON output or a printed warning `Detected macOS-origin virtualenv on Windows` (or vice versa).
+3. In the app UI, a yellow banner appears if a mismatch is detected at startup.
+
+### Fix (Safe & Quick)
+From the project root on the current machine:
+
+Windows PowerShell:
+```powershell
+Remove-Item -Recurse -Force .venv
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+macOS / Linux:
+```bash
+rm -rf .venv
+python3 -m venv .venv
+source .venv/bin/activate
+pip install --upgrade pip
+pip install -r requirements.txt
+```
+
+Re-run `python scripts/verify_env.py` to confirm `venv_mismatch` is false. Then rebuild bundles if needed.
+
+Shortcut wrappers (invoke same logic, adds safety prompts):
+```powershell
+# Windows batch
+scripts\rebuild_venv.bat --dry-run
+scripts\rebuild_venv.bat --force --yes
+
+# PowerShell wrapper
+./scripts/rebuild_venv.ps1 -DryRun
+./scripts/rebuild_venv.ps1 -Force -Yes
+
+# Direct Python (JSON summary)
+python scripts/rebuild_venv.py --force --yes --json --out rebuild_report.json
+```
+
+Smoke test (no deletion) first:
+```powershell
+scripts\rebuild_venv.bat --dry-run
+```
+If output looks correct, re-run without --dry-run.
+
+### Why Not Share .venv Across OSes?
+The venv folder hardcodes interpreter paths and sometimes compiled artifacts. Cross-platform reuse causes broken shebangs and launcher scripts.
+
+### Preventative Tip
+Add `.venv/` to your Git ignore (already present) and avoid zipping it for distribution. Always rebuild per machine.
+
+---

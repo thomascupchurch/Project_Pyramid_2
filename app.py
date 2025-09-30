@@ -116,8 +116,57 @@ def _interpreter_sanity():
     # Defensive: ensure sys.executable exists
     if not os.path.exists(sys.executable):
         print(f"[startup][warn] sys.executable missing ({sys.executable}); continuing but environment may be broken.")
+    # Cross-platform venv mismatch detection (e.g., pyvenv.cfg referencing mac path on Windows)
+    try:
+        venv_cfg = Path(sys.prefix) / 'pyvenv.cfg'
+        mismatch = False
+        origin = None
+        if venv_cfg.exists():
+            text = venv_cfg.read_text(errors='ignore')
+            if os.name == 'nt' and '\nhome = /users/' in text.lower():
+                mismatch = True; origin = 'macOS'
+            if os.name != 'nt' and '\\python.exe' in text.lower():
+                mismatch = True; origin = 'Windows'
+        if mismatch:
+            os.environ['SIGN_APP_ENV_MISMATCH'] = f"venv-origin:{origin}"  # used by banner callback
+            print(f"[startup][env][warn] Detected cross-platform virtualenv mismatch (origin {origin}). Recommend recreating venv on this platform.")
+    except Exception as e:
+        print(f"[startup][env][warn] mismatch detection failed: {e}")
 
 _interpreter_sanity()
+
+# Optional cairosvg functional probe (sets env flags for later UI/banner use)
+def _cairosvg_probe():
+    if os.environ.get('DISABLE_SVG_RENDER'):
+        os.environ['SIGN_APP_SVG_STATUS'] = 'disabled'
+        return
+    try:
+        import cairosvg  # type: ignore
+    except Exception as e:  # noqa: BLE001
+        os.environ['SIGN_APP_SVG_STATUS'] = f'missing:{e.__class__.__name__}'
+        return
+    import tempfile, pathlib
+    svg = "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='16'><rect width='40' height='16' fill='blue'/></svg>"
+    try:
+        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
+            outp = tmp.name
+        try:
+            cairosvg.svg2png(bytestring=svg.encode('utf-8'), write_to=outp)  # type: ignore
+            if not (os.path.exists(outp) and os.path.getsize(outp) > 0):
+                raise RuntimeError('empty output file')
+            os.environ['SIGN_APP_SVG_STATUS'] = 'ok'
+        except Exception as ce:  # noqa: BLE001
+            os.environ['SIGN_APP_SVG_STATUS'] = f'degraded:{ce.__class__.__name__}'
+        finally:
+            try:
+                if os.path.exists(outp):
+                    os.remove(outp)
+            except Exception:  # noqa: BLE001
+                pass
+    except Exception as outer:  # noqa: BLE001
+        os.environ['SIGN_APP_SVG_STATUS'] = f'error:{outer.__class__.__name__}'
+
+_cairosvg_probe()
 
 # Consolidated role/tab globals
 ROLE_OPTIONS = [
@@ -510,6 +559,23 @@ app.layout = dbc.Container([
     )
 ], fluid=True, className='d-flex flex-column min-vh-100')
 
+# ---------------- Environment Banner ---------------- #
+@app.callback(
+    Output('diagnostics-banner','children'),
+    Input('current-role','data'),  # fires after role init
+    prevent_initial_call=False
+)
+def show_environment_banner(_role):
+    mismatch = os.environ.get('SIGN_APP_ENV_MISMATCH')
+    if mismatch:
+        return dbc.Alert([
+            html.Strong('Environment Mismatch Detected. '),
+            'This virtual environment was created on another OS (', html.Code(mismatch.split(':',1)[-1]), '). ',
+            'Recreate it locally to prevent build/export issues. ',
+            html.Code('Remove .venv && python -m venv .venv && pip install -r requirements.txt')
+        ], color='warning', dismissable=True, className='py-2 mb-2')
+    return dash.no_update
+
 @app.callback(
     Output('role-selector','value'),            # ensure dropdown reflects restored/changed role
     Output('current-role','data'),              # session-scoped current role
@@ -759,29 +825,36 @@ def render_notes_tab():
     State('current-role','data')
 )
 def render_active_tab(tab_id, role):
-    if tab_id == 'projects-tab':
-        return render_projects_tab()
-    if tab_id == 'signs-tab':
-        return render_signs_tab()
-    if tab_id == 'groups-tab':
-        return render_groups_tab()
-    if tab_id == 'building-tab':
-        return render_building_tab()
-    if tab_id == 'estimates-tab':
-        return render_estimates_tab()
-    if tab_id == 'import-tab':
-        return render_import_tab()
-    if tab_id == 'tab_profiles':
-        return render_pricing_profiles_tab()
-    if tab_id == 'tab_snapshots':
-        return render_snapshots_tab()
-    if tab_id == 'tab_templates':
-        return render_templates_tab()
-    if tab_id == 'tab_tags':
-        return render_tags_tab()
-    if tab_id == 'tab_notes':
-        return render_notes_tab()
-    return html.Div('No tab content for selection.')
+    try:
+        if tab_id == 'projects-tab':
+            return render_projects_tab()
+        if tab_id == 'signs-tab':
+            return render_signs_tab()
+        if tab_id == 'groups-tab':
+            return render_groups_tab()
+        if tab_id == 'building-tab':
+            return render_building_tab()
+        if tab_id == 'estimates-tab':
+            return render_estimates_tab()
+        if tab_id == 'import-tab':
+            return render_import_tab()
+        if tab_id == 'tab_profiles':
+            return render_pricing_profiles_tab()
+        if tab_id == 'tab_snapshots':
+            return render_snapshots_tab()
+        if tab_id == 'tab_templates':
+            return render_templates_tab()
+        if tab_id == 'tab_tags':
+            return render_tags_tab()
+        if tab_id == 'tab_notes':
+            return render_notes_tab()
+        return html.Div('No tab content for selection.')
+    except Exception as e:
+        # Surface errors instead of leaving a blank area so issues are diagnosable when DEBUG=0
+        return dbc.Alert([
+            html.Strong('Tab render error: '),
+            html.Code(str(e)[:260])
+        ], color='danger', className='mt-3')
 
 def get_project_tree_data():
     nodes = []

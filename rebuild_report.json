@@ -1,0 +1,15 @@
+{
+  "action": "rebuild_venv",
+  "root": "C:\\Users\\tupchurch\\OneDrive - LSI\\Github projects\\Project_Pyramid_2",
+  "venv_exists": true,
+  "mismatch_detected": false,
+  "mismatch_origin": null,
+  "removed": true,
+  "created": true,
+  "installed": true,
+  "requirements": "C:\\Users\\tupchurch\\OneDrive - LSI\\Github projects\\Project_Pyramid_2\\requirements.txt",
+  "requirements_hash": "669bf4a5f5c9125924cbc1dedd81dadd67f81fa9e6375f3d2edf49dfbded97ca",
+  "error": null,
+  "aborted": false,
+  "partial_detected": true
+}
