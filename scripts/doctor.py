@@ -188,15 +188,28 @@ def main():
     recommendations: List[str] = []
     if verify_env_summary:
         cairosvg_runtime = verify_env_summary.get('cairosvg_runtime')
+        # If verify_env classified as unknown but module is missing, coerce to missing
+        try:
+            mod_info = verify_env_summary.get('modules', {}).get('cairosvg')
+            if (cairosvg_runtime in (None, 'unknown')) and isinstance(mod_info, str) and mod_info.startswith('missing:'):
+                cairosvg_runtime = 'missing'
+        except Exception:
+            pass
+        # propagate refined recommendations including new runtime classification guidance
         recs = verify_env_summary.get('recommendations') or []
         if isinstance(recs, list):
-            recommendations.extend(str(r) for r in recs)
-    # Fallback heuristic if verify_env not present
-    if cairosvg_runtime is None:
+            for r in recs:
+                if r not in recommendations:
+                    recommendations.append(str(r))
+    # Fallback heuristic / correction if runtime still unknown
+    if cairosvg_runtime in (None, 'unknown'):
         if 'cairosvg' in mod_status and not mod_status['cairosvg']:
             cairosvg_runtime = 'missing'
-        else:
-            cairosvg_runtime = 'unknown'
+        elif svg_func_status.startswith('import_error'):
+            cairosvg_runtime = 'missing'
+        elif (svg_func is False) and not cairo_scan:
+            # functional failed, no runtime libs detected in PATH scan
+            cairosvg_runtime = 'missing'
 
     summary = {
         'python_version': sys.version,
@@ -232,6 +245,8 @@ def main():
         print('CairoSVG Test  :', svg_func_status)
         if cairosvg_runtime:
             print('Cairo Runtime  :', cairosvg_runtime)
+            if cairosvg_runtime == 'missing' and 'Install native Cairo' not in ' '.join(recommendations):
+                recommendations.append('Install native Cairo (MSYS2 or gtk-runtime) to enable cairosvg rendering.')
         if cairo_scan:
             print('Cairo DLL Scan :', ', '.join(f'{k}->{os.path.basename(v)}' for k,v in cairo_scan.items()))
         if args.tables:

@@ -26,10 +26,39 @@ def build_summary():
         'modules': {},
         'cairosvg_functional': None,
         'cairosvg_runtime': None,  # present|missing|unknown
+        'cairosvg_error': None,
         'venv_mismatch': False,
         'venv_origin': None,
         'recommendations': []
     }
+
+def classify_cairosvg_runtime(error_msg: str | None, module_missing: bool, functional: bool | None) -> str:
+    """Classify cairosvg runtime state.
+
+    Rules:
+      - If module missing entirely -> missing (can't be used) unless we cannot distinguish cause.
+      - If error message references missing cairo libs / no library called cairo* / cannot load libcairo variants -> missing.
+      - If functional test passed -> present.
+      - If import succeeded but functional test failed with *not an error about missing libs* -> present (logic issue / other error).
+      - Else unknown.
+    """
+    if module_missing:
+        # If we have an error message referencing cairo libs, treat as native runtime missing; else still missing (module not available)
+        if error_msg:
+            lower = error_msg.lower()
+            if any(k in lower for k in ['no library called "cairo', 'libcairo-2.dll', 'libcairo.so', 'libcairo.2.dylib', 'cannot load library']):
+                return 'missing'
+        return 'missing'
+    if functional:
+        return 'present'
+    if error_msg:
+        lower = error_msg.lower()
+        if any(k in lower for k in ['no library called "cairo', 'libcairo-2.dll', 'libcairo.so', 'libcairo.2.dylib', 'cannot load library']):
+            return 'missing'
+    # If we reached here module imported but either functional False with non-missing libs error, or we lack signal
+    if functional is False:
+        return 'present'  # libs likely present but render failed for another reason
+    return 'unknown'
 
 summary = build_summary()
 
@@ -38,6 +67,8 @@ print('Platform', summary['platform'])
 
 missing = []
 cairosvg_native_hint = None
+cairosvg_import_error = None
+error_msg = None  # ensure defined for classification when cairosvg missing
 for mod in REQUIRED_MODULES:
     try:
         importlib.import_module(mod)
@@ -52,6 +83,7 @@ for mod in REQUIRED_MODULES:
             print("      brew install cairo pango libffi pkg-config")
         if mod == 'cairosvg' and platform.system() == 'Windows':
             cairosvg_native_hint = str(e)
+            cairosvg_import_error = str(e)
 
 """cairosvg functional test (only if present)"""
 if 'cairosvg' not in missing:
@@ -76,12 +108,7 @@ if 'cairosvg' not in missing:
                 pass
     except Exception as ie:  # noqa: BLE001
         error_msg = str(ie)
-    # Detect runtime presence heuristically (error_msg referencing missing cairo libs)
-    if error_msg and any(k in error_msg.lower() for k in ['no library called "cairo', 'libcairo-2.dll','libcairo.so','libcairo.2.dylib']):
-        summary['cairosvg_runtime'] = 'missing'
-    elif 'cairosvg' not in missing:
-        # If module present and no explicit missing markers, assume present unless render fails with signature error.
-        summary['cairosvg_runtime'] = 'present'
+    # We'll classify later after functional section
     if functional:
         summary['cairosvg_functional'] = True
         print('[OK] cairosvg functional render test')
@@ -90,36 +117,46 @@ if 'cairosvg' not in missing:
         print('[WARN] cairosvg import succeeds but render failed')
         if error_msg:
             print('       Error:', error_msg.split('\n')[0][:160])
-        print('\nGuidance:')
-        print(textwrap.dedent('''\
-          - Cairo native DLLs not found or rasterization failed. Options:
-            1) MSYS2: Install (https://www.msys2.org/), run: pacman -Syu (restart) then pacman -S mingw-w64-ucrt-x86_64-cairo
-               Add C:\\msys64\\ucrt64\\bin to PATH.
-            2) GTK Runtime: choco install gtk-runtime (ensure its bin directory is on PATH).
-            3) Manual DLLs: Place cairo, pixman, freetype, fontconfig, libpng, zlib in a folder and add that folder to PATH.
-            4) Suppress / fallback: set DISABLE_SVG_RENDER=1 (or SIGN_APP_IGNORE_MISSING=cairosvg) to skip rasterization.
-          - After installing, re-run: python scripts/verify_env.py --json
-        '''))
-        summary['recommendations'].append('Install native Cairo (MSYS2 or gtk-runtime) to enable cairosvg rendering.')
-        if os.name == 'nt':
-            summary['recommendations'].append('Ensure C:/msys64/ucrt64/bin (or gtk-runtime bin) precedes conflicting paths in PATH.')
-        summary['recommendations'].append('Set DISABLE_SVG_RENDER=1 to bypass SVG rasterization if not required.')
-        if platform.system() == 'Darwin':
-            print(textwrap.dedent('''\
-              macOS specific steps:
-                - Install via Homebrew: brew install cairo pango libffi pkg-config
-                - Ensure /opt/homebrew/lib (Apple Silicon) or /usr/local/lib (Intel) is in DYLD_FALLBACK_LIBRARY_PATH
-                - Then: pip install --force-reinstall cairosvg
-            '''))
+        # Guidance may differ depending on runtime classification later
 else:
     summary['cairosvg_functional'] = None  # not installed so not evaluated
     if cairosvg_native_hint and ('no library called' in cairosvg_native_hint.lower() or 'cairo' in cairosvg_native_hint.lower()):
         summary['recommendations'].append('Install native Cairo (Windows: MSYS2 pacman -S mingw-w64-ucrt-x86_64-cairo OR choco install gtk-runtime).')
         summary['recommendations'].append('Alternative: drop required cairo-related DLLs into a folder and add it to PATH early.')
         summary['recommendations'].append('If not needed, suppress with SIGN_APP_IGNORE_MISSING=cairosvg or DISABLE_SVG_RENDER=1.')
-        summary['cairosvg_runtime'] = 'missing'
-    else:
-        summary['cairosvg_runtime'] = 'unknown'
+
+# Final classification (works for both branches)
+summary['cairosvg_error'] = error_msg or cairosvg_import_error
+summary['cairosvg_runtime'] = classify_cairosvg_runtime(
+    summary.get('cairosvg_error'),
+    module_missing=('cairosvg' in missing),
+    functional=summary.get('cairosvg_functional')
+)
+
+# Add guidance block only if runtime genuinely missing
+if summary['cairosvg_runtime'] == 'missing':
+    if 'Install native Cairo' not in ' '.join(summary['recommendations']):
+        summary['recommendations'].append('Install native Cairo (MSYS2 or gtk-runtime) to enable cairosvg rendering.')
+    if os.name == 'nt':
+        summary['recommendations'].append('Ensure C:/msys64/ucrt64/bin (or gtk-runtime bin) precedes conflicting paths in PATH.')
+    summary['recommendations'].append('Set DISABLE_SVG_RENDER=1 to bypass SVG rasterization if not required.')
+    if platform.system() == 'Darwin':
+        summary['recommendations'].append('Homebrew: brew install cairo pango libffi pkg-config; then pip install --force-reinstall cairosvg')
+    # Only print guidance once in human mode (avoid duplication after JSON)
+    if not args.json:
+        print('\nGuidance:')
+        print(textwrap.dedent('''\
+          - Native Cairo runtime not detected. Options:
+            1) MSYS2 (preferred Windows):
+               * Install https://www.msys2.org/
+               * Run: pacman -Syu   (close shell when prompted, reopen MSYS2 UCRT64 shell)
+               * Run: pacman -S mingw-w64-ucrt-x86_64-cairo mingw-w64-ucrt-x86_64-libpng
+               * Add C:\\msys64\\ucrt64\\bin to the front of PATH (System Properties > Environment Variables)
+            2) GTK Runtime (Chocolatey): choco install gtk-runtime
+            3) Manual DLLs: Place cairo, pixman, freetype, fontconfig, libpng, zlib in a folder and add to PATH early.
+            4) Bypass: set DISABLE_SVG_RENDER=1 (or SIGN_APP_IGNORE_MISSING=cairosvg) to skip PNG rasterization.
+          - After installing, re-run: python scripts/verify_env.py --json
+        '''))
 
 """Virtual environment mismatch detection"""
 try:
@@ -166,5 +203,7 @@ if args.out:
 degraded_note = ''
 if 'cairosvg' not in missing and summary.get('cairosvg_functional') is False:
     degraded_note = ' (degraded: cairosvg render failed)'
+if summary.get('cairosvg_runtime') == 'missing' and 'cairosvg' in missing:
+    degraded_note += ' (cairosvg & native cairo missing)'
 print('\nEnvironment verification complete.' + degraded_note)
 sys.exit(exit_code)

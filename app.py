@@ -533,7 +533,8 @@ app.layout = dbc.Container([
         ])
     ]),
     dbc.Row([
-        dbc.Col(html.Div(id='diagnostics-banner'))
+    # Diagnostics banner removed per request
+    # dbc.Col(html.Div(id='diagnostics-banner'))
     ]),
     # Dynamic tabs (role filtered)
     dbc.Row([
@@ -544,7 +545,8 @@ app.layout = dbc.Container([
     dcc.Interval(id='global-dropdown-refresh', interval=int(os.getenv('SIGN_APP_DROPDOWN_REFRESH_MS','300000')), n_intervals=0),
     dcc.Store(id='app-state', data={}),
     dcc.Store(id='last-error-message'),
-    dcc.Store(id='env-banner-dismissed', data=False),
+    # dcc.Store for diagnostics banner dismissed (removed)
+    # dcc.Store(id='env-banner-dismissed', data=False),
     dcc.Interval(id='status-refresh-interval', interval=5*60*1000, n_intervals=0),
     html.Div([
         dbc.Toast(id='app-error-toast', header='Notice', is_open=False, dismissable=True, duration=4000, icon='danger', style={'position':'fixed','top':10,'right':10,'zIndex':1080})
@@ -3262,81 +3264,7 @@ def update_cyto_layout(spacing_factor, padding, label_width, node_size, toggle_l
 
 ## (Removed earlier duplicate hover callback to avoid duplicate output errors)
 
-# Diagnostics banner generation (unified: env mismatch + svg export + missing optional modules)
-@app.callback(
-    Output('diagnostics-banner','children'),
-    Input('main-tabs','active_tab'),
-    Input('env-banner-dismissed','data')
-)
-def diagnostics_banner(_active, dismissed):
-    # Allow complete suppression via env var
-    if os.getenv('SIGN_APP_HIDE_ENV_NOTICE','').lower() in ('1','true','yes'):
-        return ''
-    if dismissed:
-        return ''
-    # Gather distinct banner segments
-    banners = []
-    mismatch = os.environ.get('SIGN_APP_ENV_MISMATCH')
-    if mismatch:
-        banners.append(dbc.Alert([
-            html.Strong('Environment Mismatch: '),
-            'Virtualenv created on another OS (', html.Code(mismatch.split(':',1)[-1]), '). ',
-            'Recreate locally to avoid export/build issues. ',
-            html.Code('Remove .venv && python -m venv .venv && pip install -r requirements.txt')
-        ], color='warning', className='py-2 mb-2'))
-
-    svg_status = os.environ.get('SIGN_APP_SVG_STATUS')
-    if svg_status and svg_status not in {'ok'}:
-        color = 'warning'
-        msg_detail = ''
-        if svg_status.startswith('missing'):
-            msg_detail = 'cairosvg not installed or native Cairo libs missing.'; color='danger'
-        elif svg_status.startswith('degraded'):
-            msg_detail = 'cairosvg present but render test failed – using fallback raster logic.'
-        elif svg_status.startswith('disabled'):
-            msg_detail = 'SVG rasterization disabled by configuration.'
-        elif svg_status.startswith('error'):
-            msg_detail = 'Unexpected error during SVG probe; exports may be limited.'; color='danger'
-        banners.append(dbc.Alert([
-            html.Strong('SVG Export Notice: '), msg_detail, ' (status: ', html.Code(svg_status), '). ',
-            'Run ', html.Code('python scripts/verify_env.py --json'), ' for details.'
-        ], color=color, className='py-2 mb-2'))
-
-    # Optional module presence
-    ignore = {x.strip().lower() for x in os.getenv('SIGN_APP_IGNORE_MISSING','').split(',') if x.strip()}
-    optional_modules = [
-        ('reportlab','PDF Export'),
-        ('kaleido','Static Plot Export'),
-        ('cairosvg','SVG Rasterization'),
-        ('PIL','Image Processing')
-    ]
-    missing = []
-    for mod,_label in optional_modules:
-        try:
-            __import__(mod)
-        except Exception:
-            if mod.lower() not in ignore and mod.lower() not in {m.lower() for m in missing}:
-                missing.append(mod)
-    if missing:
-        banners.append(dbc.Alert([
-            html.Strong('Optional Packages Missing: '),
-            html.Span(', '.join(missing)),
-            html.Span('. Some export/preview features may be reduced. ', className='ms-1'),
-            html.Small('Adjust SIGN_APP_IGNORE_MISSING or set SIGN_APP_HIDE_ENV_NOTICE=1 to suppress.', className='text-muted'),
-            dbc.Button('×', id='close-env-banner', color='link', size='sm', className='p-0 ms-2', n_clicks=0,
-                       style={'textDecoration':'none','fontSize':'1.2rem','lineHeight':'1rem','float':'right'})
-        ], color='warning', className='py-2 mb-2 position-relative'))
-
-    if not banners:
-        return ''
-    # Return list so Dash renders stacked alerts (each dismissable separately in future if needed)
-    return banners
-
-@app.callback(Output('env-banner-dismissed','data'), Input('close-env-banner','n_clicks'), prevent_initial_call=True)
-def dismiss_env_banner(n):
-    if not n:
-        raise PreventUpdate
-    return True
+### Diagnostics banner removed per request (SVG Export Notice & Optional Packages Missing)
 
 # Project deletion callback
 @app.callback(
