@@ -6,8 +6,15 @@ This document explains how to deploy and update the Sign Estimation Application 
 
 Two distribution modes are supported:
 
-1. Source Deployment (default): Copies Python source files + database to OneDrive. Coworkers need Python installed. Startup scripts auto-create a per-user virtual environment outside OneDrive.
+1. Source Deployment (default): Copies Python source files + database to OneDrive. Coworkers need Python installed (Python 3.11+ Windows/mac). Startup scripts auto-create a per-user virtual environment outside OneDrive.
 2. Bundled Deployment (optional): Builds a PyInstaller bundle (`sign_estimator` or `sign_estimator_console`) and copies it to OneDrive. Coworkers can run without a Python installation.
+
+Generated launchers now include:
+| File | Platform | Behavior |
+|------|----------|----------|
+| `start_app.bat` | Windows CMD | Detect bundle → else source w/ per-user venv |
+| `start_app.ps1` | Windows PowerShell | Same logic with colored output |
+| `start_app.sh` | macOS / Linux | Detect bundle binaries → else source with per-user venv in `~/Library/Application Support/SignEstimator` (mac) or `$HOME/.local/share/SignEstimator` |
 
 You can use either or both simultaneously. Startup scripts will prefer a bundle if present.
 
@@ -61,7 +68,7 @@ Examples:
 python scripts/deploy.py --exclude-db
 
 # Force everything, rebuild bundle, include console variant
-action scripts/deploy.py --force --bundle --bundle-console
+python scripts/deploy.py --force --bundle --bundle-console
 
 # Disable hash comparison (mtime only)
 python scripts/deploy.py --no-hash
@@ -83,7 +90,7 @@ Build and copy bundle(s):
 ```powershell
 python scripts/deploy.py --bundle
 # or include console window build
-action scripts/deploy.py --bundle --bundle-console
+python scripts/deploy.py --bundle --bundle-console
 ```
 
 The bundles are copied under `bundle/` inside the OneDrive deployment root. Example structure:
@@ -104,17 +111,26 @@ Startup scripts auto-detect these and launch the GUI build first; if not present
 ## 3. Coworker Instructions (Source or Bundle)
 
 1. Open the shared OneDrive folder (e.g., `SignEstimationApp`).
-2. Double-click `start_app.bat` (Windows) OR right-click `start_app.ps1` → Run with PowerShell.
+2. Launch:
+  - Windows: double-click `start_app.bat` (or run `start_app.ps1` in PowerShell)
+  - macOS/Linux: `chmod +x start_app.sh && ./start_app.sh`
 3. First run (source mode): it creates a virtual environment in `%LOCALAPPDATA%\SignEstimator\venv` and installs dependencies if needed.
 4. Browser: navigate to http://localhost:8050 (or whichever port shown). Bundle will open the same service internally.
 
 ### Requirements for Source Mode
-- Windows 10/11
-- Python 3.11+ on PATH
-- OneDrive sync client running
+- Windows 10/11 OR macOS 13+ (or Linux, experimental)
+- Python 3.11+ on PATH (`python3 --version`)
+- OneDrive sync client running (mac: ensure new OneDrive location in `~/Library/CloudStorage/...` is fully synced)
 
 ### No Python? Use Bundle
 If Python isn't installed, build a bundle so coworkers can launch without dependencies. They still share the same SQLite DB in `database/` unless you instruct otherwise.
+
+mac Note: Bundled `sign_estimator` will appear under `bundle/sign_estimator/`. Gatekeeper may block first launch; if so run:
+```
+chmod +x bundle/sign_estimator/sign_estimator
+xattr -dr com.apple.quarantine bundle/sign_estimator/sign_estimator || true
+```
+Then relaunch. (Only needed on unsigned first-run artifacts.)
 
 ---
 ## 4. Database Handling

@@ -567,14 +567,33 @@ app.layout = dbc.Container([
 )
 def show_environment_banner(_role):
     mismatch = os.environ.get('SIGN_APP_ENV_MISMATCH')
+    svg_status = os.environ.get('SIGN_APP_SVG_STATUS')
+    banners = []
     if mismatch:
-        return dbc.Alert([
+        banners.append(dbc.Alert([
             html.Strong('Environment Mismatch Detected. '),
             'This virtual environment was created on another OS (', html.Code(mismatch.split(':',1)[-1]), '). ',
             'Recreate it locally to prevent build/export issues. ',
             html.Code('Remove .venv && python -m venv .venv && pip install -r requirements.txt')
-        ], color='warning', dismissable=True, className='py-2 mb-2')
-    return dash.no_update
+        ], color='warning', dismissable=True, className='py-2 mb-2'))
+    if svg_status and svg_status not in {'ok'}:
+        color = 'warning'
+        msg_detail = ''
+        if svg_status.startswith('missing'):
+            msg_detail = 'cairosvg not installed or native Cairo libs missing.'; color='danger'
+        elif svg_status.startswith('degraded'):
+            msg_detail = 'cairosvg present but render test failed – fallback raster logic will be used.'
+        elif svg_status.startswith('disabled'):
+            msg_detail = 'SVG rasterization disabled by DISABLE_SVG_RENDER environment variable.'
+        elif svg_status.startswith('error'):
+            msg_detail = 'Unexpected error during SVG probe; exports may be limited.'; color='danger'
+        banners.append(dbc.Alert([
+            html.Strong('SVG Export Notice: '), msg_detail, ' (status: ', html.Code(svg_status), '). ',
+            'Run ', html.Code('python scripts/verify_env.py --json'), ' for details.'
+        ], color=color, dismissable=True, className='py-2 mb-2'))
+    if not banners:
+        return dash.no_update
+    return banners
 
 @app.callback(
     Output('role-selector','value'),            # ensure dropdown reflects restored/changed role
