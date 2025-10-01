@@ -1,6 +1,6 @@
 #!/usr/bin/env python
 """
-verify_env.py - Environment verification utility for the Sign Estimation app.
+verify_env.py - Environment verification utility for the Sign Package Estimator.
 
 Checks for required modules, performs a cairosvg functional render test (if
 installed), detects cross‑platform virtual environment mismatches, and can
@@ -14,25 +14,30 @@ REQUIRED_MODULES = [
     'dash_cytoscape', 'cairosvg', 'reportlab', 'kaleido'
 ]
 
-parser = argparse.ArgumentParser(description='Verify Sign Estimation environment')
+parser = argparse.ArgumentParser(description='Verify Sign Package Estimator environment')
 parser.add_argument('--json', action='store_true', help='Emit JSON summary to stdout (machine readable)')
 parser.add_argument('--out', help='Write JSON summary to file')
 args, _unknown = parser.parse_known_args()
 
-summary = {
-    'python_version': sys.version,
-    'platform': platform.platform(),
-    'modules': {},
-    'cairosvg_functional': None,
-    'venv_mismatch': False,
-    'venv_origin': None,
-    'recommendations': []
-}
+def build_summary():
+    return {
+        'python_version': sys.version,
+        'platform': platform.platform(),
+        'modules': {},
+        'cairosvg_functional': None,
+        'cairosvg_runtime': None,  # present|missing|unknown
+        'venv_mismatch': False,
+        'venv_origin': None,
+        'recommendations': []
+    }
+
+summary = build_summary()
 
 print('Python', summary['python_version'])
 print('Platform', summary['platform'])
 
 missing = []
+cairosvg_native_hint = None
 for mod in REQUIRED_MODULES:
     try:
         importlib.import_module(mod)
@@ -45,6 +50,8 @@ for mod in REQUIRED_MODULES:
         if mod == 'cairosvg' and platform.system() == 'Darwin':
             print("    > macOS hint: install native libs then 'pip install cairosvg'")
             print("      brew install cairo pango libffi pkg-config")
+        if mod == 'cairosvg' and platform.system() == 'Windows':
+            cairosvg_native_hint = str(e)
 
 """cairosvg functional test (only if present)"""
 if 'cairosvg' not in missing:
@@ -69,6 +76,12 @@ if 'cairosvg' not in missing:
                 pass
     except Exception as ie:  # noqa: BLE001
         error_msg = str(ie)
+    # Detect runtime presence heuristically (error_msg referencing missing cairo libs)
+    if error_msg and any(k in error_msg.lower() for k in ['no library called "cairo', 'libcairo-2.dll','libcairo.so','libcairo.2.dylib']):
+        summary['cairosvg_runtime'] = 'missing'
+    elif 'cairosvg' not in missing:
+        # If module present and no explicit missing markers, assume present unless render fails with signature error.
+        summary['cairosvg_runtime'] = 'present'
     if functional:
         summary['cairosvg_functional'] = True
         print('[OK] cairosvg functional render test')
@@ -79,13 +92,18 @@ if 'cairosvg' not in missing:
             print('       Error:', error_msg.split('\n')[0][:160])
         print('\nGuidance:')
         print(textwrap.dedent('''\
-          - Cairo native DLLs not found. Options:
-            1) Install GTK runtime (adds libcairo-2.dll).
-            2) Install MSYS2 and add mingw64\\bin to PATH.
-            3) Manually copy libcairo-2.dll and dependencies into a cairo_runtime/ folder and prepend PATH.
-            4) Set DISABLE_SVG_RENDER=1 to skip SVG rasterization (fallback to text/PNG assets).
-          - After installing, re-run: python scripts/verify_env.py
+          - Cairo native DLLs not found or rasterization failed. Options:
+            1) MSYS2: Install (https://www.msys2.org/), run: pacman -Syu (restart) then pacman -S mingw-w64-ucrt-x86_64-cairo
+               Add C:\\msys64\\ucrt64\\bin to PATH.
+            2) GTK Runtime: choco install gtk-runtime (ensure its bin directory is on PATH).
+            3) Manual DLLs: Place cairo, pixman, freetype, fontconfig, libpng, zlib in a folder and add that folder to PATH.
+            4) Suppress / fallback: set DISABLE_SVG_RENDER=1 (or SIGN_APP_IGNORE_MISSING=cairosvg) to skip rasterization.
+          - After installing, re-run: python scripts/verify_env.py --json
         '''))
+        summary['recommendations'].append('Install native Cairo (MSYS2 or gtk-runtime) to enable cairosvg rendering.')
+        if os.name == 'nt':
+            summary['recommendations'].append('Ensure C:/msys64/ucrt64/bin (or gtk-runtime bin) precedes conflicting paths in PATH.')
+        summary['recommendations'].append('Set DISABLE_SVG_RENDER=1 to bypass SVG rasterization if not required.')
         if platform.system() == 'Darwin':
             print(textwrap.dedent('''\
               macOS specific steps:
@@ -95,6 +113,13 @@ if 'cairosvg' not in missing:
             '''))
 else:
     summary['cairosvg_functional'] = None  # not installed so not evaluated
+    if cairosvg_native_hint and ('no library called' in cairosvg_native_hint.lower() or 'cairo' in cairosvg_native_hint.lower()):
+        summary['recommendations'].append('Install native Cairo (Windows: MSYS2 pacman -S mingw-w64-ucrt-x86_64-cairo OR choco install gtk-runtime).')
+        summary['recommendations'].append('Alternative: drop required cairo-related DLLs into a folder and add it to PATH early.')
+        summary['recommendations'].append('If not needed, suppress with SIGN_APP_IGNORE_MISSING=cairosvg or DISABLE_SVG_RENDER=1.')
+        summary['cairosvg_runtime'] = 'missing'
+    else:
+        summary['cairosvg_runtime'] = 'unknown'
 
 """Virtual environment mismatch detection"""
 try:

@@ -1,4 +1,4 @@
-"""Comprehensive environment & deployment health diagnostic for Sign Estimation App.
+"""Comprehensive environment & deployment health diagnostic for Sign Package Estimator.
 
 Checks performed:
   - Python version & platform
@@ -18,6 +18,32 @@ Usage:
 """
 from __future__ import annotations
 import sys, os, argparse, json, hashlib, sqlite3, tempfile, platform, importlib.util, pathlib
+from typing import List, Dict
+
+# Attempt to reuse verify_env logic if available
+def _load_verify_env_summary() -> dict | None:
+    try:
+        import runpy
+        # Execute verify_env.py in isolated globals capturing summary by calling build_summary and replicating logic would be heavy;
+        # simpler: run as module with --json via subprocess for isolation.
+        import subprocess, shutil, json as _json
+        pyexe = sys.executable
+        script = pathlib.Path(__file__).parent / 'verify_env.py'
+        if not script.exists():
+            return None
+        proc = subprocess.run([pyexe, str(script), '--json'], capture_output=True, text=True, timeout=30)
+        if proc.returncode not in (0,1):  # 1 allowed if missing modules
+            return None
+        # Last JSON block should parse
+        txt = proc.stdout.strip()
+        # Find JSON object start
+        brace = txt.rfind('{')
+        if brace == -1:
+            return None
+        data = _json.loads(txt[brace:])
+        return data
+    except Exception:
+        return None
 
 CORE_MODULES = [
     'dash', 'pandas', 'plotly', 'dash_bootstrap_components', 'reportlab', 'kaleido', 'cairosvg'
@@ -119,8 +145,28 @@ def load_install_marker():
     return False, None
 
 
+def _scan_cairo_runtime() -> Dict[str, str]:
+    """Scan PATH for cairo-related DLL / shared objects to help diagnose native availability.
+
+    Returns mapping of filename -> resolved path for first match of each target.
+    """
+    targets = ['cairo.dll','libcairo-2.dll','libcairo.so','libcairo.so.2','libcairo.2.dylib']
+    found = {}
+    path_entries = os.environ.get('PATH','').split(os.pathsep)
+    for t in targets:
+        for p in path_entries:
+            candidate = pathlib.Path(p) / t
+            try:
+                if candidate.exists():
+                    found[t] = str(candidate)
+                    break
+            except Exception:
+                continue
+    return found
+
+
 def main():
-    ap = argparse.ArgumentParser(description='Environment & deployment doctor for Sign Estimation App')
+    ap = argparse.ArgumentParser(description='Environment & deployment doctor for Sign Package Estimator')
     ap.add_argument('--json', action='store_true', help='Emit JSON only')
     ap.add_argument('--tables', action='store_true', help='Include table list & counts')
     ap.add_argument('--no-cairosvg', action='store_true', help='Skip cairosvg functional test')
@@ -135,6 +181,22 @@ def main():
     tables = list_tables(args.db, args.tables)
     marker_ok, marker_path = load_install_marker()
     svg_probe = os.environ.get('SIGN_APP_SVG_STATUS')
+    verify_env_summary = _load_verify_env_summary()
+    cairo_scan = _scan_cairo_runtime()
+
+    cairosvg_runtime = None
+    recommendations: List[str] = []
+    if verify_env_summary:
+        cairosvg_runtime = verify_env_summary.get('cairosvg_runtime')
+        recs = verify_env_summary.get('recommendations') or []
+        if isinstance(recs, list):
+            recommendations.extend(str(r) for r in recs)
+    # Fallback heuristic if verify_env not present
+    if cairosvg_runtime is None:
+        if 'cairosvg' in mod_status and not mod_status['cairosvg']:
+            cairosvg_runtime = 'missing'
+        else:
+            cairosvg_runtime = 'unknown'
 
     summary = {
         'python_version': sys.version,
@@ -142,6 +204,7 @@ def main():
         'core_modules': mod_status,
         'cairosvg_functional': svg_func,
         'cairosvg_functional_status': svg_func_status,
+        'cairosvg_runtime': cairosvg_runtime,
         'venv_mismatch': mism,
         'venv_origin': origin,
         'requirements_sha256': req_hash,
@@ -149,12 +212,14 @@ def main():
         'install_marker_present': marker_ok,
         'install_marker_path': marker_path,
         'svg_probe_status': svg_probe,
+        'cairo_runtime_scan': cairo_scan,
+        'recommendations': recommendations,
     }
 
     if args.json:
         print(json.dumps(summary, indent=2))
     else:
-        print('Sign Estimation App Doctor Report')
+        print('Sign Package Estimator Doctor Report')
         print('--------------------------------')
         print('Python         :', summary['python_version'].split()[0])
         print('Platform       :', summary['platform'])
@@ -165,6 +230,10 @@ def main():
         if svg_probe and svg_probe != 'ok':
             print('SVG Probe      :', svg_probe)
         print('CairoSVG Test  :', svg_func_status)
+        if cairosvg_runtime:
+            print('Cairo Runtime  :', cairosvg_runtime)
+        if cairo_scan:
+            print('Cairo DLL Scan :', ', '.join(f'{k}->{os.path.basename(v)}' for k,v in cairo_scan.items()))
         if args.tables:
             if 'error' in tables and tables['error']:
                 print('Tables         : error -', tables['error'])
@@ -180,6 +249,10 @@ def main():
             print('Missing modules detected — run: pip install -r requirements.txt')
         if not marker_ok:
             print('Install marker missing — a reinstall may be triggered on next launcher run.')
+        if recommendations:
+            print('\nRecommendations:')
+            for r in recommendations:
+                print(' -', r)
 
     if args.out:
         try:

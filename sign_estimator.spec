@@ -1,4 +1,4 @@
-# PyInstaller spec file for Sign Estimation Tool
+# PyInstaller spec file for Sign Package Estimator
 # Generated to bundle the Dash application into a distributable folder.
 # Usage:
 #   pyinstaller sign_estimator.spec

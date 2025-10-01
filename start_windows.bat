@@ -4,7 +4,7 @@ SET "HIDEENV=0"
 FOR %%A IN (%*) DO (
   IF /I "%%~A"=="/HIDEENV" SET "HIDEENV=1"
 )
-REM Simple launcher for Sign Estimation Tool (Windows LAN / OneDrive)
+REM Simple launcher for Sign Package Estimator (Windows LAN / OneDrive)
 SETLOCAL ENABLEDELAYEDEXPANSION
 cd /d %~dp0
 
@@ -40,7 +40,7 @@ IF %ERRORLEVEL% NEQ 0 (
 )
 
 echo --------------------------------------------
-echo Launching Sign Estimation App
+echo Launching Sign Package Estimator
 echo Python     : %VENV_PY%
 echo Port       : %SIGN_APP_PORT: =% (default 8050 if unset)
 echo Working Dir: %CD%

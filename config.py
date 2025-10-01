@@ -1,4 +1,4 @@
-"""Central configuration for Sign Estimation Tool.
+"""Central configuration for Sign Package Estimator.
 
 Allows easy tweaking when deploying for co-workers on Windows over LAN / OneDrive.
 Environment variables override defaults so you can adapt without editing code.

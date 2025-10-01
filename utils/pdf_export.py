@@ -451,7 +451,7 @@ def generate_estimate_pdf(
     ]))
     story.append(subtotal_tbl)
     story.append(Spacer(1, 18))
-    story.append(Paragraph('<font size=8 color="#555555">Prepared using the internal Sign Estimation Tool. Figures are for estimation purposes only.</font>', styles['Normal']))
+    story.append(Paragraph('<font size=8 color="#555555">Prepared using the internal Sign Package Estimator. Figures are for estimation purposes only.</font>', styles['Normal']))
 
     # Optional Notes Section (appendix-like but before multi-image appendix)
     notes_included = 0
