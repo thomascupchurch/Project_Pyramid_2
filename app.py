@@ -135,38 +135,7 @@ def _interpreter_sanity():
 
 _interpreter_sanity()
 
-# Optional cairosvg functional probe (sets env flags for later UI/banner use)
-def _cairosvg_probe():
-    if os.environ.get('DISABLE_SVG_RENDER'):
-        os.environ['SIGN_APP_SVG_STATUS'] = 'disabled'
-        return
-    try:
-        import cairosvg  # type: ignore
-    except Exception as e:  # noqa: BLE001
-        os.environ['SIGN_APP_SVG_STATUS'] = f'missing:{e.__class__.__name__}'
-        return
-    import tempfile, pathlib
-    svg = "<svg xmlns='http://www.w3.org/2000/svg' width='40' height='16'><rect width='40' height='16' fill='blue'/></svg>"
-    try:
-        with tempfile.NamedTemporaryFile(suffix='.png', delete=False) as tmp:
-            outp = tmp.name
-        try:
-            cairosvg.svg2png(bytestring=svg.encode('utf-8'), write_to=outp)  # type: ignore
-            if not (os.path.exists(outp) and os.path.getsize(outp) > 0):
-                raise RuntimeError('empty output file')
-            os.environ['SIGN_APP_SVG_STATUS'] = 'ok'
-        except Exception as ce:  # noqa: BLE001
-            os.environ['SIGN_APP_SVG_STATUS'] = f'degraded:{ce.__class__.__name__}'
-        finally:
-            try:
-                if os.path.exists(outp):
-                    os.remove(outp)
-            except Exception:  # noqa: BLE001
-                pass
-    except Exception as outer:  # noqa: BLE001
-        os.environ['SIGN_APP_SVG_STATUS'] = f'error:{outer.__class__.__name__}'
-
-_cairosvg_probe()
+# Removed _cairosvg_probe (previously set SIGN_APP_SVG_STATUS) as banners were eliminated.
 
 # Consolidated role/tab globals
 ROLE_OPTIONS = [
@@ -561,9 +530,7 @@ app.layout = dbc.Container([
     )
 ], fluid=True, className='d-flex flex-column min-vh-100')
 
-# ---------------- Diagnostics & Environment Banner (Unified) ---------------- #
-# Consolidated into single callback later in file (diagnostics_banner) to avoid duplicate
-# Output('diagnostics-banner','children') declarations.
+## (Removed temporary footer_status callback to avoid duplicate Output on runtime-status)
 
 @app.callback(
     Output('role-selector','value'),            # ensure dropdown reflects restored/changed role
@@ -2460,16 +2427,50 @@ def _get_code_timestamp() -> tuple[str, str]:
 
 @app.callback(
     Output('runtime-status','children'),
-    Input('status-refresh-interval','n_intervals')
+    Input('status-refresh-interval','n_intervals'),
+    prevent_initial_call=False
 )
 def update_runtime_status(_n):
+    """Unified footer status (Python version, DB size & age, code age, optional SVG short status).
+
+    Hides entirely if SIGN_APP_HIDE_ENV_NOTICE=1.
+    """
+    if os.getenv('SIGN_APP_HIDE_ENV_NOTICE','').lower() in ('1','true','yes'):
+        return ''
     try:
         db_rel, db_iso = _get_db_timestamp()
         code_rel, code_iso = _get_code_timestamp()
-        parts = []
-        parts.append(f"DB: {db_rel}" + (f" ({db_iso})" if db_iso else ''))
-        parts.append(f"Code: {code_rel}" + (f" ({code_iso})" if code_iso else ''))
-        return html.Small(' • '.join(parts), className='text-muted')
+        py_ver = f"Py {sys.version_info.major}.{sys.version_info.minor}"
+        # DB size
+        size_txt = ''
+        try:
+            if DATABASE_PATH and os.path.exists(DATABASE_PATH):
+                sz = os.path.getsize(DATABASE_PATH)
+                if sz >= 1_000_000:
+                    size_txt = f"{(sz/1_000_000):.1f}MB"
+                elif sz >= 10_000:
+                    size_txt = f"{(sz/1000):.0f}KB"
+                else:
+                    size_txt = f"{sz}B"
+        except Exception:
+            pass
+        svg_status = os.environ.get('SIGN_APP_SVG_STATUS')
+        svg_short = ''
+        if svg_status and svg_status not in {'ok'}:
+            svg_short = 'SVG ' + svg_status.split(':',1)[0]
+        parts = [py_ver]
+        if size_txt:
+            parts.append(f"DB {size_txt} ({db_rel})")
+        else:
+            parts.append(f"DB {db_rel}")
+        parts.append(f"Code {code_rel}")
+        if svg_short:
+            parts.append(svg_short)
+        # Keep ISO timestamps as title tooltip
+        title_attr = None
+        if db_iso or code_iso:
+            title_attr = f"DB: {db_iso or 'n/a'} | Code: {code_iso or 'n/a'}"
+        return html.Small(' • '.join(parts), className='text-muted', title=title_attr)
     except Exception as e:
         return html.Small(f"Status unavailable: {e}", className='text-muted')
 
