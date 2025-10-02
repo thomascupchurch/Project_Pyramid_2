@@ -21,7 +21,9 @@ param(
   [string]$Database = $env:SIGN_APP_DB,
   [string]$InitialCsv = $env:SIGN_APP_INITIAL_CSV,
   [switch]$ForceReinstall,
-  [switch]$HideEnvNotice
+  [switch]$HideEnvNotice,
+  [switch]$NoBrowser,
+  [switch]$Minimized
 )
 
 # Resolve script directory & switch
@@ -137,15 +139,19 @@ $VenvPy = $PerUserPy
 if (-not $Port) { $Port = 8050 }
 if (-not $Database) { $Database = 'sign_estimation.db' }
 
-Write-Host "--------------------------------------------" -ForegroundColor Cyan
-Write-Host "Launching Sign Estimation App (source mode)" -ForegroundColor Green
-Write-Host "Python     : $VenvPy (per-user)"
-Write-Host "Database   : $Database"
-if ($InitialCsv) { Write-Host "Initial CSV: $InitialCsv" }
-Write-Host "Port       : $Port"
-Write-Host "Working Dir: $ScriptDir"
-if ($HideEnvNotice) { Write-Host "(Env Notice suppressed)" -ForegroundColor DarkYellow }
-Write-Host "--------------------------------------------" -ForegroundColor Cyan
+if (-not $Minimized) {
+  Write-Host "--------------------------------------------" -ForegroundColor Cyan
+  Write-Host "Launching Sign Estimation App (source mode)" -ForegroundColor Green
+  Write-Host "Python     : $VenvPy (per-user)"
+  Write-Host "Database   : $Database"
+  if ($InitialCsv) { Write-Host "Initial CSV: $InitialCsv" }
+  Write-Host "Port       : $Port"
+  Write-Host "Working Dir: $ScriptDir"
+  if ($HideEnvNotice) { Write-Host "(Env Notice suppressed)" -ForegroundColor DarkYellow }
+  if ($NoBrowser) { Write-Host "(Auto browser launch disabled)" -ForegroundColor DarkGray }
+  if ($Minimized) { Write-Host "(Minimized output mode)" -ForegroundColor DarkGray }
+  Write-Host "--------------------------------------------" -ForegroundColor Cyan
+}
 
 # --- Optional Cairo runtime injection (for cairosvg SVG->PNG support) ---
 $cairoRuntime = Join-Path $ScriptDir 'cairo_runtime'
@@ -171,27 +177,47 @@ $env:SIGN_APP_DB = $Database
 if ($InitialCsv) { $env:SIGN_APP_INITIAL_CSV = $InitialCsv }
 if ($HideEnvNotice) { $env:SIGN_APP_HIDE_ENV_NOTICE = '1' }
 
-& $VenvPy app.py
+if ($Minimized) {
+  # Start the server in a background job to allow browser open without clutter
+  Start-Job -ScriptBlock { param($py) & $py run_server.py } -ArgumentList $VenvPy | Out-Null
+} else {
+  & $VenvPy run_server.py
+}
 $code = $LASTEXITCODE
 
 # Optional lightweight health probe (wait a few seconds then query /health if port reachable)
-Start-Sleep -Seconds 4
+Start-Sleep -Seconds 6
 try {
   $url = "http://127.0.0.1:$Port/health"
   $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
   if ($resp.StatusCode -eq 200) {
-    Write-Host "[health] App responded OK" -ForegroundColor DarkGreen
+    if (-not $Minimized) { Write-Host "[health] App responded OK" -ForegroundColor DarkGreen }
+    if (-not $NoBrowser) {
+      try {
+        $baseUrl = "http://127.0.0.1:$Port/"
+        Start-Process $baseUrl
+        if (-not $Minimized) { Write-Host "[open] Launched default browser -> $baseUrl" -ForegroundColor Green }
+      } catch {
+        if (-not $Minimized) { Write-Host "[open][warn] Failed to open browser: $($_.Exception.Message)" -ForegroundColor Yellow }
+      }
+    }
   } else {
-    Write-Host "[health] Non-200 status: $($resp.StatusCode)" -ForegroundColor Yellow
+    if (-not $Minimized) { Write-Host "[health] Non-200 status: $($resp.StatusCode)" -ForegroundColor Yellow }
   }
 } catch {
-  Write-Host "[health] Probe failed (app may still be initializing): $($_.Exception.Message)" -ForegroundColor DarkGray
+  if (-not $Minimized) { Write-Host "[health] Probe failed (app may still be initializing): $($_.Exception.Message)" -ForegroundColor DarkGray }
 }
 
-if ($code -ne 0) {
-  Write-Host "App exited with code $code" -ForegroundColor Red
-  exit $code
+if (-not $Minimized) {
+  if ($code -ne 0 -and -not $Minimized) {
+    Write-Host "App exited with code $code" -ForegroundColor Red
+    exit $code
+  } else {
+    Write-Host "App started (monitor console for logs)." -ForegroundColor Green
+    exit 0
+  }
 } else {
-  Write-Host "App started (monitor console for logs)." -ForegroundColor Green
+  # In minimized mode we just keep the job running; optionally exit 0 quickly.
+  Write-Host "App background job started. Use Get-Job to inspect." -ForegroundColor DarkGreen
   exit 0
 }

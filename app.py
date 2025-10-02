@@ -4164,7 +4164,8 @@ def find_free_port(preferred: int) -> int:
                 port += 1
     return preferred  # fallback if all attempts fail
 
-if __name__ == "__main__":
+def start_server():
+    """Programmatic server start used by run_server.py and __main__ guard."""
     ensure_backup_dir()
     preferred = APP_PORT
     free_port = find_free_port(preferred)
@@ -4182,7 +4183,7 @@ if __name__ == "__main__":
                     ts = datetime.now().strftime('%Y%m%d_%H%M%S')
                     target = BACKUP_DIR / f'sign_estimation_{ts}.db'
                     shutil.copy2(DATABASE_PATH, target)
-                except Exception as e:
+                except Exception as e:  # noqa: BLE001
                     print(f"[backup][warn] {e}")
                 time.sleep(AUTO_BACKUP_INTERVAL_SEC)
         threading.Thread(target=_auto_backup_loop, daemon=True).start()
@@ -4197,3 +4198,6 @@ if __name__ == "__main__":
         except Exception:
             pass
         raise
+
+if __name__ == "__main__":
+    start_server()
