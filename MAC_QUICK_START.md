@@ -30,18 +30,35 @@ cd Project_Pyramid_2
 ---
 ## 3. First Launch (Creates Virtual Env Automatically)
 ```bash
-chmod +x start_app.sh          # first time only
+chmod +x start_app.sh setup_mac.sh   # first time only
 ./start_app.sh
+```
+Alternatively (one-shot setup + run):
+```bash
+./setup_mac.sh
 ```
 This will:
 - Create `.venv` if absent
 - Install/refresh dependencies if `requirements.txt` changed
 - Start the Dash server on `http://127.0.0.1:8050`
+- Record deployment metadata (version) in `deployment_info.json` (if deployed bundle)
+
+If you see: `python3: command not found` install Python 3.10+ from:
+https://www.python.org/downloads/
 
 Override host/port:
 ```bash
 SIGN_APP_HOST=0.0.0.0 SIGN_APP_PORT=8060 ./start_app.sh
 ```
+
+`setup_mac.sh` accepts optional env vars:
+```bash
+PYTHON_BIN=python3.12 INSTALL_CAIROSVG=1 ./setup_mac.sh
+```
+Flags:
+- `PYTHON_BIN`: choose a specific python interpreter.
+- `VENV_DIR`: override default `.venv-mac` directory.
+- `INSTALL_CAIROSVG=1`: attempt to install native cairo libs + force reinstall cairosvg.
 
 Auto-import a CSV (only if DB empty):
 ```bash
@@ -77,6 +94,11 @@ python scripts/verify_env.py
 Look for:
 - `[OK] cairosvg functional render test` (SVG ready)
 - Warnings provide remediation steps.
+
+Quick runtime health (includes version):
+```bash
+curl -s http://127.0.0.1:8050/health | jq
+```
 
 ---
 ## 6. OneDrive Path Detection
@@ -192,6 +214,7 @@ brew install cairo pango libffi pkg-config
 pip install --force-reinstall cairosvg
 ./start_app.sh
 python scripts/verify_env.py
+curl -s http://127.0.0.1:8050/health | jq
 ```
 
 ---

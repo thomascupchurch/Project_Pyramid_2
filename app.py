@@ -11,7 +11,46 @@ from dash import html, dcc, Input, Output, State, callback_context, dash_table
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
 import plotly.express as px
-import dash_cytoscape as cyto
+import importlib.util as _ilu_cyto, importlib.metadata as _imd_cyto, json as _json_cyto, pathlib as _pl_cyto
+def _import_cyto_with_stub():
+    try:
+        import dash_cytoscape as _cy
+        return _cy
+    except FileNotFoundError as fe:
+        # Attempt stub creation then retry once
+        try:
+            spec = _ilu_cyto.find_spec('dash_cytoscape')
+            v = None
+            try:
+                v = _imd_cyto.version('dash-cytoscape')
+            except Exception:
+                v = 'unknown'
+            if spec and spec.origin:
+                pkg_dir = _pl_cyto.Path(spec.origin).parent
+                pj = pkg_dir / 'package.json'
+                if not pj.exists():
+                    stub = {"name":"dash_cytoscape","version":v,"stub":True}
+                    try:
+                        pj.write_text(_json_cyto.dumps(stub))
+                    except Exception:
+                        # fallback to _MEIPASS path if available
+                        mp = getattr(sys,'_MEIPASS',None)
+                        if mp:
+                            alt = _pl_cyto.Path(mp) / 'dash_cytoscape'
+                            alt.mkdir(exist_ok=True, parents=True)
+                            (alt / 'package.json').write_text(_json_cyto.dumps(stub))
+                    os.environ['SIGN_APP_CYTO_STUB'] = '1'
+                    print('[startup][repair] Created dash_cytoscape package.json stub after FileNotFoundError')
+            import dash_cytoscape as _cy_retry
+            return _cy_retry
+        except Exception as inner:
+            print(f"[startup][error] cytoscape stub repair failed: {inner} (original {fe})")
+            raise fe
+    except Exception as e:
+        print(f"[startup][warn] dash_cytoscape import non-fatal issue: {e}")
+        raise
+
+cyto = _import_cyto_with_stub()
 import pandas as pd
 import sqlite3
 from datetime import datetime, timezone
@@ -20,6 +59,7 @@ import io
 import json
 from pathlib import Path
 from dash.exceptions import PreventUpdate
+from flask import jsonify
 
 # Lightweight image type detector (avoid imghdr dependency warnings)
 def _detect_image_type(raw: bytes, filename: str) -> str | None:
@@ -103,6 +143,45 @@ ensure_extended_schema()
 # Dash app
 app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
 app.title = "Sign Package Estimator"
+
+# Expose a lightweight /health endpoint for remote diagnostics
+server = app.server
+@server.route('/health')
+def health_route():  # type: ignore
+    try:
+        db_exists = os.path.exists(DATABASE_PATH)
+        size = os.path.getsize(DATABASE_PATH) if db_exists else 0
+        frozen = bool(getattr(sys, 'frozen', False))
+        cyto_pkg_json = None
+        try:
+            import importlib.util as _ilu, pathlib as _pl
+            _cy = _ilu.find_spec('dash_cytoscape')
+            if _cy and _cy.origin:
+                pj = _pl.Path(_cy.origin).parent / 'package.json'
+                cyto_pkg_json = pj.exists()
+        except Exception:
+            cyto_pkg_json = False
+        version = '0.0.0'
+        try:
+            vfile = Path(__file__).parent / 'VERSION.txt'
+            if vfile.exists():
+                version = vfile.read_text().strip()
+        except Exception:
+            pass
+        return jsonify({
+            'status': 'ok',
+            'version': version,
+            'python': f"{sys.version_info.major}.{sys.version_info.minor}.{sys.version_info.micro}",
+            'db_exists': db_exists,
+            'db_size_bytes': size,
+            'svg_status': os.environ.get('SIGN_APP_SVG_STATUS'),
+            'env_mismatch': os.environ.get('SIGN_APP_ENV_MISMATCH'),
+            'cwd': str(Path.cwd()),
+            'frozen': frozen,
+            'dash_cytoscape_package_json': cyto_pkg_json
+        })
+    except Exception as e:  # noqa: BLE001
+        return jsonify({'status':'error','error':str(e)}), 500
 
 # Runtime cross-platform interpreter path sanity check
 def _interpreter_sanity():
@@ -3686,69 +3765,82 @@ def static_tree_hover(hoverData):
 )
 def manage_material_pricing(active_tab, add_clicks, save_clicks, recalc_clicks, rows):
     triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
-    if 'main-tabs' in triggered and active_tab == 'signs-tab':
-        conn = sqlite3.connect(DATABASE_PATH)
-        try:
-            df = pd.read_sql_query("SELECT material_name, price_per_sq_ft FROM material_pricing ORDER BY material_name", conn)
-        except Exception as e:
-            conn.close()
-            return [], dbc.Alert(f"Error loading materials: {e}", color='danger')
-        conn.close()
-        return df.to_dict('records'), ''
-    if 'add-material-btn' in triggered:
-        data = rows or []
-        data.append({'material_name':'','price_per_sq_ft':0})
-        return data, 'Row added'
-    if 'save-materials-btn' in triggered and rows is not None:
-        conn = sqlite3.connect(DATABASE_PATH)
-        cur = conn.cursor()
-        saved = 0
-        for r in rows:
-            name = (r.get('material_name') or '').strip()
-            if not name:
-                continue
-            try:
-                p = float(r.get('price_per_sq_ft') or 0)
-            except:
-                p = 0
-            cur.execute('''
-                INSERT INTO material_pricing (material_name, price_per_sq_ft)
-                VALUES (?,?)
-                ON CONFLICT(material_name) DO UPDATE SET price_per_sq_ft=excluded.price_per_sq_ft, last_updated=CURRENT_TIMESTAMP
-            ''', (name, p))
-            saved += 1
-        conn.commit(); conn.close()
-        return rows, f'Saved {saved} materials'
-    if 'recalc-sign-prices-btn' in triggered:
-        conn = sqlite3.connect(DATABASE_PATH)
-        cur = conn.cursor()
-        cur.execute('''
-            UPDATE sign_types
-            SET unit_price = CASE 
-                WHEN width>0 AND height>0 THEN (
-                    width*height*COALESCE(
-                        (SELECT price_per_sq_ft FROM material_pricing mp WHERE LOWER(mp.material_name)=LOWER(sign_types.material)),
-                        price_per_sq_ft
-                    )
-                ) 
-                ELSE unit_price END,
-                price_per_sq_ft = COALESCE((SELECT price_per_sq_ft FROM material_pricing mp WHERE LOWER(mp.material_name)=LOWER(sign_types.material)), price_per_sq_ft),
-                last_modified = CURRENT_TIMESTAMP
-        ''')
-        conn.commit(); conn.close()
-        return rows, 'Recalculated sign prices'
-    raise PreventUpdate
 
-# ------------------ Sign Groups CRUD ------------------ #
-@app.callback(
-    Output('group-save-feedback','children'),
-    Output('group-select-dropdown','options', allow_duplicate=True),
-    Output('group-assign-group-dropdown','options', allow_duplicate=True),
-    Input('save-group-btn','n_clicks'),
-    State('group-name-input','value'),
-    State('group-desc-input','value'),
-    prevent_initial_call=True
-)
+    # 1. Tab switched to Sign Types: load fresh data
+    if 'main-tabs' in triggered and active_tab == 'signs-tab':
+        try:
+            conn = sqlite3.connect(DATABASE_PATH)
+            df = pd.read_sql_query(
+                "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name",
+                conn
+            )
+            conn.close()
+        except Exception:
+            df = pd.DataFrame(columns=['name','description','material_alt','unit_price','material','price_per_sq_ft','material_multiplier','width','height','install_type','install_time_hours','per_sign_install_rate','image_path'])
+        records = df.to_dict('records')
+        return records, '', records
+
+    # 2. Add new blank row
+    if 'add-sign-btn' in triggered and active_tab == 'signs-tab':
+        rows = data_rows or []
+        rows.append({
+            'name':'','description':'','material_alt':'','unit_price':0,'material':'','price_per_sq_ft':0,
+            'material_multiplier':0,'width':0,'height':0,'install_type':'','install_time_hours':0,'per_sign_install_rate':0,'image_path':None
+        })
+        return rows, 'New row added', rows
+
+    # 3. User edited table -> persist changes
+    if 'signs-table' in triggered and active_tab == 'signs-tab':
+        rows = data_rows or []
+        if not rows:
+            return [], '', []
+        try:
+            conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+            saved = 0
+            cleaned = []
+            def n(v):
+                try: return float(v or 0)
+                except Exception: return 0.0
+            sql = (
+                'INSERT INTO sign_types (name, description, material_alt, unit_price, material, price_per_sq_ft, width, height, '
+                'material_multiplier, install_type, install_time_hours, per_sign_install_rate, image_path) '
+                'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                'ON CONFLICT(name) DO UPDATE SET description=excluded.description, material_alt=excluded.material_alt, unit_price=excluded.unit_price, '
+                'material=excluded.material, price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height, '
+                'material_multiplier=excluded.material_multiplier, install_type=excluded.install_type, install_time_hours=excluded.install_time_hours, '
+                'per_sign_install_rate=excluded.per_sign_install_rate, image_path=COALESCE(excluded.image_path, image_path)'
+            )
+            for row in rows:
+                name = (row.get('name') or '').strip()
+                if not name:
+                    continue
+                try:
+                    cur.execute(sql, (
+                        name,
+                        (row.get('description') or '')[:255],
+                        (row.get('material_alt') or '')[:120],
+                        n(row.get('unit_price')),
+                        (row.get('material') or '')[:120],
+                        n(row.get('price_per_sq_ft')),
+                        n(row.get('width')),
+                        n(row.get('height')),
+                        n(row.get('material_multiplier')),
+                        (row.get('install_type') or '')[:60],
+                        n(row.get('install_time_hours')),
+                        n(row.get('per_sign_install_rate')),
+                        row.get('image_path')
+                    ))
+                    saved += 1
+                    cleaned.append(row)
+                except Exception:
+                    continue
+            conn.commit(); conn.close()
+            return cleaned, dbc.Alert(f'Saved {saved} sign types', color='success'), cleaned
+        except Exception as e:
+            return rows, dbc.Alert(f'Error saving sign types: {e}', color='danger'), rows
+
+    # No relevant trigger -> no update
+    raise PreventUpdate
 def save_group(n_clicks, name, desc):
     if not n_clicks:
         raise PreventUpdate

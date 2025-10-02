@@ -1,5 +1,15 @@
 <#
 PowerShell launcher for Sign Estimation Application
+
+Primary goals:
+  1. Seamless coworker launch from shared OneDrive (no manual Python setup needed).
+  2. Prefer PyInstaller bundle if present AND healthy.
+  3. Fallback to source + per-user venv (outside OneDrive) if bundle missing or incomplete.
+  4. Provide clear guidance when execution policy blocks the script.
+
+If you see: "running scripts is disabled" run PowerShell as Administrator once:
+  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned
+
 Usage examples:
   ./start_app.ps1
   $env:SIGN_APP_PORT=8060; ./start_app.ps1
@@ -14,9 +24,48 @@ param(
   [switch]$HideEnvNotice
 )
 
-# Resolve script directory
+# Resolve script directory & switch
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
+
+# ---------------------------------------------------------------
+# Bundle preference & health validation
+# ---------------------------------------------------------------
+$BundleRoot = Join-Path $ScriptDir 'bundle'
+$GuiBundle = Join-Path $BundleRoot 'sign_estimator'
+$ConsoleBundle = Join-Path $BundleRoot 'sign_estimator_console'
+$BundleExe = Join-Path $GuiBundle 'sign_estimator.exe'
+$ConsoleExe = Join-Path $ConsoleBundle 'sign_estimator_console.exe'
+
+function Test-CytoResource {
+  param([string]$BundleDir)
+  if (-not (Test-Path $BundleDir)) { return $false }
+  $cy = Join-Path $BundleDir 'dash_cytoscape/package.json'
+  return (Test-Path $cy)
+}
+
+function Use-Bundle {
+  param([string]$ExePath)
+  Write-Host "Launching bundled executable: $ExePath" -ForegroundColor Green
+  Start-Process -FilePath $ExePath
+  exit 0
+}
+
+$PreferredExe = $null
+$PreferredDir = $null
+if (Test-Path $BundleExe) { $PreferredExe = $BundleExe; $PreferredDir = $GuiBundle }
+elseif (Test-Path $ConsoleExe) { $PreferredExe = $ConsoleExe; $PreferredDir = $ConsoleBundle }
+
+if ($PreferredExe) {
+  if (Test-CytoResource -BundleDir $PreferredDir) {
+    Write-Host '[bundle] Cytoscape assets present ✔' -ForegroundColor DarkGreen
+    Use-Bundle -ExePath $PreferredExe
+  } else {
+    Write-Host '[bundle][warn] Cytoscape assets missing – falling back to source environment.' -ForegroundColor Yellow
+  }
+} else {
+  Write-Host '[bundle] No bundle found – using source launch.' -ForegroundColor Yellow
+}
 
 # ------------------------------------------------------------------
 # Per-user virtual environment management (outside synced directory)
@@ -89,7 +138,7 @@ if (-not $Port) { $Port = 8050 }
 if (-not $Database) { $Database = 'sign_estimation.db' }
 
 Write-Host "--------------------------------------------" -ForegroundColor Cyan
-Write-Host "Launching Sign Estimation App" -ForegroundColor Green
+Write-Host "Launching Sign Estimation App (source mode)" -ForegroundColor Green
 Write-Host "Python     : $VenvPy (per-user)"
 Write-Host "Database   : $Database"
 if ($InitialCsv) { Write-Host "Initial CSV: $InitialCsv" }
@@ -124,9 +173,25 @@ if ($HideEnvNotice) { $env:SIGN_APP_HIDE_ENV_NOTICE = '1' }
 
 & $VenvPy app.py
 $code = $LASTEXITCODE
+
+# Optional lightweight health probe (wait a few seconds then query /health if port reachable)
+Start-Sleep -Seconds 4
+try {
+  $url = "http://127.0.0.1:$Port/health"
+  $resp = Invoke-WebRequest -Uri $url -UseBasicParsing -TimeoutSec 3 -ErrorAction Stop
+  if ($resp.StatusCode -eq 200) {
+    Write-Host "[health] App responded OK" -ForegroundColor DarkGreen
+  } else {
+    Write-Host "[health] Non-200 status: $($resp.StatusCode)" -ForegroundColor Yellow
+  }
+} catch {
+  Write-Host "[health] Probe failed (app may still be initializing): $($_.Exception.Message)" -ForegroundColor DarkGray
+}
+
 if ($code -ne 0) {
   Write-Host "App exited with code $code" -ForegroundColor Red
+  exit $code
 } else {
-  Write-Host "App exited normally" -ForegroundColor Green
+  Write-Host "App started (monitor console for logs)." -ForegroundColor Green
+  exit 0
 }
-exit $code

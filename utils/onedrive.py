@@ -422,16 +422,16 @@ class OneDriveManager:
             'echo No bundle found, using Python source launch...',
             f'cd /d "{app_dir}"',
             'set APP_NAME=SignEstimator',
-            'set BASE_DIR=%LOCALAPPDATA%\%APP_NAME%',
-            'set VENV_DIR=%BASE_DIR%\venv',
+            r'set BASE_DIR=%LOCALAPPDATA%\%APP_NAME%',
+            r'set VENV_DIR=%BASE_DIR%\venv',
             'if not exist "%BASE_DIR%" mkdir "%BASE_DIR%" >nul 2>&1',
             'if not exist "%VENV_DIR%" (',
             '  echo Creating per-user virtual environment (first run)...',
             '  python -m venv "%VENV_DIR%" || (echo Failed to create venv & goto RUN_FALLBACK)',
             ')',
-            'call "%VENV_DIR%\Scripts\activate.bat" || (echo Could not activate venv & goto RUN_FALLBACK)',
+            r'call "%VENV_DIR%\Scripts\activate.bat" || (echo Could not activate venv & goto RUN_FALLBACK)',
             'if exist requirements.txt (',
-            '  set MARKER_FILE=%BASE_DIR%\install_complete.marker',
+            r'  set MARKER_FILE=%BASE_DIR%\install_complete.marker',
             '  if not exist "%BASE_DIR%\requirements.sha256" (set NEED_INSTALL=1) else set NEED_INSTALL=0',
             '  for /f "tokens=*" %%i in ("powershell -NoProfile -Command (Get-FileHash requirements.txt -Algorithm SHA256).Hash") do set CUR_HASH=%%i',
             '  if exist "%BASE_DIR%\requirements.sha256" (',
@@ -449,11 +449,11 @@ class OneDriveManager:
             '  ) else echo Dependencies up-to-date.',
             ')',
             ':: Core module sanity check (dash, pandas, plotly, dash_bootstrap_components, reportlab, kaleido).',
-            'for /f "usebackq delims=" %%M in (`"%VENV_DIR%\Scripts\python.exe" -c "import importlib,sys;mods=[''dash'',''pandas'',''plotly'',''dash_bootstrap_components'',''reportlab'',''kaleido''];missing=[m for m in mods if importlib.util.find_spec(m) is None];print(','.join(missing))"`) do set CORE_MISSING=%%M',
+            r'for /f "usebackq delims=" %%M in (`"%VENV_DIR%\Scripts\python.exe" -c "import importlib,sys;mods=[''dash'',''pandas'',''plotly'',''dash_bootstrap_components'',''reportlab'',''kaleido''];print(','.join([m for m in mods if importlib.util.find_spec(m) is None]))"`) do set CORE_MISSING=%%M',
             'if defined CORE_MISSING if NOT "%CORE_MISSING%"=="" (',
             '  echo Core modules missing (%CORE_MISSING%) - forcing dependency reinstall...',
             '  pip install -r requirements.txt || echo Warning: forced reinstall issues',
-            '  echo ok>"%BASE_DIR%\install_complete.marker"',
+            r'  echo ok>"%BASE_DIR%\install_complete.marker"',
             ')',
             ':RUN_APP',
             'echo Starting application with virtual environment...',
@@ -469,30 +469,40 @@ class OneDriveManager:
             f.write("\n".join(batch_lines))
 
         ps_lines = [
-            '# PowerShell launcher for Sign Estimation Application',
+            '<#',
+            'PowerShell launcher for Sign Estimation Application',
+            'Auto-detects a healthy bundle; falls back to source + per-user venv.',
+            '',
+            'If you get an execution policy error run:',
+            '  Set-ExecutionPolicy -Scope CurrentUser RemoteSigned',
+            '#>',
             f'$AppDir = "{app_dir}"',
             f'$BundleDir = "{bundle_dir}"',
             f'$BundleExe = Join-Path $BundleDir "sign_estimator/sign_estimator.exe"',
             f'$BundleConsoleExe = Join-Path $BundleDir "sign_estimator_console/sign_estimator_console.exe"',
+            '$Preferred = $null',
+            'if (Test-Path $BundleExe) { $Preferred = $BundleExe } elseif (Test-Path $BundleConsoleExe) { $Preferred = $BundleConsoleExe }',
+            'function Test-CytoResource { param([string]$Dir) if (-not (Test-Path $Dir)) { return $false }; return Test-Path (Join-Path $Dir "dash_cytoscape/package.json") }',
             'Write-Host "============================================" -ForegroundColor Cyan',
             'Write-Host " Sign Estimation Application Launcher" -ForegroundColor Green',
             'Write-Host "============================================" -ForegroundColor Cyan',
-            'if (Test-Path $BundleExe) { $Preferred = $BundleExe } elseif (Test-Path $BundleConsoleExe) { $Preferred = $BundleConsoleExe }',
             'if ($Preferred) {',
-            '  Write-Host "Launching bundled executable: $Preferred" -ForegroundColor Green',
-            '  Start-Process -FilePath $Preferred',
-            '  exit 0',
+            '  $BundleDirResolved = Split-Path $Preferred -Parent',
+            '  if (Test-CytoResource -Dir $BundleDirResolved) {',
+            '     Write-Host "Launching bundled executable: $Preferred" -ForegroundColor Green',
+            '     Start-Process -FilePath $Preferred',
+            '     exit 0',
+            '  } else {',
+            '     Write-Host "[bundle][warn] Cytoscape assets missing – falling back to source." -ForegroundColor Yellow',
+            '  }',
             '}',
-            'Write-Host "No bundle found; launching from source." -ForegroundColor Yellow',
+            'Write-Host "No usable bundle found; launching from source." -ForegroundColor Yellow',
             'Set-Location $AppDir',
             '$AppName = "SignEstimator"',
             '$BaseDir = Join-Path $env:LOCALAPPDATA $AppName',
             '$VenvDir = Join-Path $BaseDir "venv"',
             'if (-not (Test-Path $BaseDir)) { New-Item -ItemType Directory -Path $BaseDir | Out-Null }',
-            'if (-not (Test-Path $VenvDir)) {',
-            '  Write-Host "Creating virtual environment..." -ForegroundColor Yellow',
-            '  python -m venv $VenvDir',
-            '}',
+            'if (-not (Test-Path $VenvDir)) { Write-Host "Creating virtual environment..." -ForegroundColor Yellow; python -m venv $VenvDir }',
             '$Activate = Join-Path $VenvDir "Scripts/Activate.ps1"',
             'if (Test-Path $Activate) { . $Activate } else { Write-Host "Could not activate venv, using system python" -ForegroundColor Red }',
             '$ReqFile = Join-Path $AppDir "requirements.txt"',
@@ -508,13 +518,8 @@ class OneDriveManager:
             '     $CurHash | Out-File $HashFile -Encoding ASCII',
             '  } else { Write-Host "Dependencies up-to-date." -ForegroundColor DarkGreen }',
             '}',
-            '# Core module sanity check (dash & pandas) to guard against partial installs',
             '$coreMissing = & python -c "import importlib,sys;mods=[\'dash\',\'pandas\',\'plotly\',\'dash_bootstrap_components\',\'reportlab\',\'kaleido\'];print(\",\".join([m for m in mods if importlib.util.find_spec(m) is None]))"',
-            'if ($coreMissing) {',
-            '  Write-Host "Core modules missing ($coreMissing) - forcing reinstall..." -ForegroundColor Yellow',
-            '  pip install -r $ReqFile',
-            '  "ok" | Out-File (Join-Path $BaseDir "install_complete.marker") -Encoding ASCII',
-            '}',
+            'if ($coreMissing) { Write-Host "Core modules missing ($coreMissing) - forcing reinstall..." -ForegroundColor Yellow; pip install -r $ReqFile }',
             'Write-Host "Starting application..." -ForegroundColor Green',
             'python app.py'
         ]
@@ -531,6 +536,17 @@ class OneDriveManager:
             'echo "============================================"',
             f'APP_DIR="{app_dir}"',
             f'BUNDLE_DIR="{bundle_dir}"',
+            '# If on Unix and APP_DIR looks like a Windows drive path (e.g. C:\\...), rewrite to script directory',
+            'if [ "$(uname)" = "Darwin" ] || [ "$(uname)" = "Linux" ]; then',
+            '  if [[ "$APP_DIR" == *:\\* ]]; then',
+            '    SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"',
+            '    if [ -d "$SCRIPT_DIR/app" ]; then',
+            '      APP_DIR="$SCRIPT_DIR/app"',
+            '    else',
+            '      APP_DIR="$SCRIPT_DIR"',
+            '    fi',
+            '  fi',
+            'fi',
             'GUI_BUNDLE="$BUNDLE_DIR/sign_estimator/sign_estimator"',
             'CONSOLE_BUNDLE="$BUNDLE_DIR/sign_estimator_console/sign_estimator_console"',
             'if [ -x "$GUI_BUNDLE" ]; then',
@@ -553,6 +569,10 @@ class OneDriveManager:
             'VENV_DIR="$BASE_DIR/venv"',
             'mkdir -p "$BASE_DIR"',
             'if [ ! -x "$VENV_DIR/bin/python" ]; then',
+            '  if ! command -v python3 >/dev/null 2>&1; then',
+            '     echo "[error] python3 not found. Please install Python 3.10+ from https://www.python.org/downloads/"',
+            '     exit 2',
+            '  fi',
             '  echo "Creating virtual environment (first run)..."',
             '  python3 -m venv "$VENV_DIR" || { echo "Failed to create venv"; exit 2; }',
             'fi',
@@ -575,8 +595,9 @@ class OneDriveManager:
             '     echo "Dependencies up-to-date."',
             '  fi',
             'fi',
-            '# Core module sanity check (dash & pandas)',
-            'MISSING=$("$PY" - <<EOF\nimport importlib,sys;mods=[\'dash\',\'pandas\',\'plotly\',\'dash_bootstrap_components\',\'reportlab\',\'kaleido\'];missing=[m for m in mods if importlib.util.find_spec(m) is None];print(','.join(missing))\nEOF\n)',
+            '# Core module sanity check (dash, pandas, etc.)',
+            # Use double quotes for Python string; single quotes remain for list elements safely
+            'MISSING=$("$PY" -c "import importlib,sys;mods=[\'dash\',\'pandas\',\'plotly\',\'dash_bootstrap_components\',\'reportlab\',\'kaleido\'];print(\',\'.join([m for m in mods if importlib.util.find_spec(m) is None]))")',
             'if [ -n "$MISSING" ]; then',
             '  echo "Core modules missing ($MISSING) – reinstalling..."',
             '  "$PY" -m pip install -r "$REQ" || echo "Warning: forced reinstall failed"',
@@ -587,8 +608,19 @@ class OneDriveManager:
         ]
         sh_file = self.onedrive_path / 'start_app.sh'
         try:
-            with open(sh_file, 'w') as f:
+            # Write with Unix (LF) line endings explicitly so macOS/Linux shebang works after Windows deployment
+            with open(sh_file, 'w', newline='\n') as f:
                 f.write("\n".join(sh_lines) + "\n")
+            # Defensive: if somehow CRLF slipped in (older deployments), normalize in place
+            try:
+                with open(sh_file, 'rb') as rf:
+                    content = rf.read()
+                if b'\r\n' in content:
+                    fixed = content.replace(b'\r\n', b'\n')
+                    with open(sh_file, 'wb') as wf:
+                        wf.write(fixed)
+            except Exception:
+                pass
             os.chmod(sh_file, 0o755)
         except Exception:
             pass

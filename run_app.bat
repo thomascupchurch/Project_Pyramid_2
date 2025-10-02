@@ -1,85 +1,57 @@
 @echo off
-REM Optional flag: /HIDEENV suppresses environment notice banner inside the app
-SET "HIDEENV=0"
-FOR %%A IN (%*) DO (
-  IF /I "%%~A"=="/HIDEENV" SET "HIDEENV=1"
-)
-REM -------------------------------------------------------------
-REM Sign Estimation App Launcher (Windows)
-REM Supports optional environment variables before calling:
-REM   SET SIGN_APP_PORT=8060
-REM   SET SIGN_APP_DB=shared_signs.db
-REM   SET SIGN_APP_INITIAL_CSV=Book2.csv
-REM Then run:
-REM   run_app.bat
-REM -------------------------------------------------------------
+REM Minimal reliable launcher (supports /CHECK and /HIDEENV). No complex flow to avoid parser issues.
 
-SETLOCAL ENABLEDELAYEDEXPANSION
-
-REM Determine script directory (handles spaces)
+SETLOCAL
 SET "SCRIPT_DIR=%~dp0"
-PUSHD "%SCRIPT_DIR%"
+PUSHD "%SCRIPT_DIR%" >NUL 2>&1
 
-REM Virtual environment python
-SET "VENV_DIR=.venv"
-SET "VENV_PY=%VENV_DIR%\Scripts\python.exe"
-
+SET "VENV_PY=.venv\Scripts\python.exe"
 IF NOT EXIST "%VENV_PY%" (
-  echo [setup] Virtual environment missing – attempting to create at %VENV_DIR%
-  WHERE py >nul 2>&1
-  IF %ERRORLEVEL%==0 (
-    py -3 -m venv "%VENV_DIR%" || (
-      echo [error] Failed to create venv with py launcher.& EXIT /B 2
-    )
-  ) ELSE (
-    WHERE python >nul 2>&1 || (echo [error] Neither 'py' nor 'python' command found in PATH. Install Python 3.11+ first. & EXIT /B 3)
-    python -m venv "%VENV_DIR%" || (echo [error] Failed to create venv with python.& EXIT /B 4)
-  )
+  echo [setup] Creating virtual environment (.venv)
+  WHERE py >NUL 2>&1 && (py -3 -m venv .venv) || (python -m venv .venv)
 )
-
 IF NOT EXIST "%VENV_PY%" (
-  echo [error] Python executable still not found at %VENV_PY% after creation attempt.
-  echo         Ensure anti-virus/OneDrive did not block file creation.
-  EXIT /B 5
-)
-
-REM Bootstrap dependencies if needed (simple heuristic: check pip presence of dash)
-"%VENV_PY%" -c "import dash" >nul 2>&1
-IF %ERRORLEVEL% NEQ 0 (
-  echo [deps] Installing required packages (this may take a moment)...
-  "%VENV_PY%" -m pip install --upgrade pip setuptools wheel >nul 2>&1
-  IF EXIST requirements.txt (
-    "%VENV_PY%" -m pip install -r requirements.txt || (echo [error] pip install failed.& EXIT /B 6)
-  ) ELSE (
-    echo [warn] requirements.txt not found – proceeding without dependency sync.
+  echo [error] Could not find or create .venv\Scripts\python.exe
+  echo         Ensure Python 3.10+ is installed and added to PATH: https://www.python.org/downloads/
+  WHERE py >NUL 2>&1 || WHERE python >NUL 2>&1 || (
+     echo [hint] Neither 'py' launcher nor 'python' command detected.
   )
+  EXIT /B 2
 )
 
-REM Defaults if not provided
+REM Flag scan (string match)
+SET "CHECKONLY=0"
+SET "HIDEENV=0"
+ECHO %* | FINDSTR /I "/CHECK"   >NUL 2>&1 && SET "CHECKONLY=1"
+ECHO %* | FINDSTR /I "/DRYRUN"  >NUL 2>&1 && SET "CHECKONLY=1"
+ECHO %* | FINDSTR /I "/HIDEENV" >NUL 2>&1 && SET "HIDEENV=1"
+IF "%HIDEENV%"=="1" SET "SIGN_APP_HIDE_ENV_NOTICE=1"
+
+REM Dependency probe
+"%VENV_PY%" -c "import dash" >NUL 2>&1 || (
+  echo [deps] Installing requirements...
+  "%VENV_PY%" -m pip install --upgrade pip setuptools wheel >NUL 2>&1
+  IF EXIST requirements.txt "%VENV_PY%" -m pip install -r requirements.txt || (echo [error] pip install failed & EXIT /B 3)
+)
+
 IF NOT DEFINED SIGN_APP_PORT SET "SIGN_APP_PORT=8050"
 IF NOT DEFINED SIGN_APP_DB SET "SIGN_APP_DB=sign_estimation.db"
 
-ECHO --------------------------------------------
-ECHO Launching Sign Estimation App
-ECHO Python: %VENV_PY%
-ECHO Database: %SIGN_APP_DB%
-IF DEFINED SIGN_APP_INITIAL_CSV ECHO Initial CSV: %SIGN_APP_INITIAL_CSV%
-ECHO Port: %SIGN_APP_PORT%
-ECHO Working Dir: %SCRIPT_DIR%
-IF "%HIDEENV%"=="1" ECHO (Environment notice suppressed)
-ECHO --------------------------------------------
+echo --------------------------------------------
+echo Sign Estimation App
+echo Python   : %VENV_PY%
+echo Port     : %SIGN_APP_PORT%
+echo Database : %SIGN_APP_DB%
+IF "%HIDEENV%"=="1" echo (Environment notice suppressed)
+echo --------------------------------------------
 
-REM Pass environment through; app reads SIGN_APP_* directly
-IF "%HIDEENV%"=="1" SET "SIGN_APP_HIDE_ENV_NOTICE=1"
-"%VENV_PY%" app.py %*
-
-IF ERRORLEVEL 1 (
-  ECHO.
-  ECHO [!] Application exited with errors (code %ERRORLEVEL%).
-) ELSE (
-  ECHO.
-  ECHO Application exited normally.
+IF "%CHECKONLY%"=="1" (
+  echo [info] CHECK mode: environment looks OK.
+  POPD
+  ENDLOCAL & EXIT /B 0
 )
 
+"%VENV_PY%" app.py %*
+SET "CODE=%ERRORLEVEL%"
 POPD
-ENDLOCAL
+ENDLOCAL & EXIT /B %CODE%

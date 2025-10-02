@@ -3,6 +3,7 @@
 A modern Python web application for sign manufacturing cost estimation and project management, built specifically for sign manufacturing companies with teams working on Windows machines with Microsoft 365.
 
 > macOS Support: The project now includes automatic OneDrive path detection on macOS (`~/Library/CloudStorage/OneDrive-*`) and a `start_app.sh` launcher with Homebrew guidance for enabling SVG/Cairo rendering.
+> Runtime Health: The app exposes `/health` returning JSON (status, version, python, frozen, cytoscape asset presence).
 
 ## 🎯 Features
 
@@ -261,6 +262,54 @@ LAN deployment here is plain HTTP inside your internal network. Do not expose di
 
 2. **On Windows Machines**: Run `start_app.bat` or `start_app.ps1`
 3. **On macOS Machines**: Run `./start_app.sh` (first time: `chmod +x start_app.sh`)
+
+### Windows Automated Setup & Cleanup
+
+For a fresh local developer (or power‑user) setup you can use the scripted bootstrap instead of manual venv creation:
+
+PowerShell (from project root):
+```
+./scripts/setup_windows.ps1
+```
+Options:
+- `-Force`           Reinstall dependencies even if requirement hash matches
+- `-RebuildVenv`     Delete and recreate the virtual environment from scratch
+- `-SkipVerify`      Skip the post‑install environment diagnostic
+
+Example (force dependency refresh):
+```
+./scripts/setup_windows.ps1 -Force
+```
+
+To validate only (no server) with the classic batch launcher:
+```
+run_app.bat /CHECK
+```
+
+When you need to wipe local artifacts (venv, DB, backups, exports) without touching source code use the cleanup helper:
+```
+./cleanup_windows.ps1 -DryRun
+```
+Then rerun with desired flags:
+- `-RemoveVenv`        Delete `.venv` (or per‑user venv if script targeted it)
+- `-RemoveDb`          Delete `sign_estimation.db`
+- `-PurgeBackups`      Delete everything under `backups/`
+- `-PurgeExports`      Delete generated export files (tree images, estimate PDFs/XLSX)
+- `-Force`             Perform actions without interactive confirmation
+- `-DryRun`            Show what would be removed (safety first)
+
+Full reset example (keep source only):
+```
+./cleanup_windows.ps1 -RemoveVenv -RemoveDb -PurgeBackups -PurgeExports -Force
+```
+
+Use cases:
+- Reclaim disk space after many export/backups
+- Start from a pristine state before a demo
+- Replace a corrupted local DB after restoring a backup copy
+
+Tip: Always run once with `-DryRun` to confirm scope. The script never deletes unless an explicit flag is provided.
+
 
 ### One-Step Build + Deploy (Developer)
 
@@ -576,6 +625,10 @@ Auto-calculation: If you later recalc material pricing, unit_price is overwritte
 4. On export failure an error workbook is returned with cause noted
 
 ## 🧪 Health / Export Test (Example)
+Check runtime health (shows version after deployment):
+```bash
+curl -s http://127.0.0.1:8050/health | jq
+```
 
 Add a pytest similar to:
 

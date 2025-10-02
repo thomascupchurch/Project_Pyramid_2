@@ -229,3 +229,32 @@ Set org-wide defaults (System Properties > Environment Variables) or through Gro
 
 ---
 Happy estimating!
+
+---
+## 12. Automated Cleanup / Uninstall
+Use the provided PowerShell cleanup script for safe removal of local environment artifacts.
+
+Dry run (shows what would be deleted):
+```powershell
+powershell -ExecutionPolicy Bypass -File cleanup_windows.ps1 -DryRun
+```
+Remove only the virtual environment:
+```powershell
+powershell -File cleanup_windows.ps1
+```
+Remove venv + database + backups (prompted):
+```powershell
+powershell -File cleanup_windows.ps1 -RemoveDb -PurgeBackups
+```
+Full purge (no prompts):
+```powershell
+powershell -File cleanup_windows.ps1 -RemoveDb -PurgeBackups -PurgeExports -Force
+```
+Flags:
+- `-RemoveDb`       Delete current database (respects SIGN_APP_DB)
+- `-PurgeBackups`   Delete sign_estimation.backup*.db files
+- `-PurgeExports`   Delete files under exports/ (report outputs)
+- `-Force`          Skip confirmation prompt
+- `-DryRun`         Preview actions only
+
+Always run with `-DryRun` first in shared or critical folders.

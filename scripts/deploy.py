@@ -8,13 +8,31 @@ import sys
 import os
 import argparse
 import platform
+import datetime
 from pathlib import Path
 
-# Add utils to path
-sys.path.append(str(Path(__file__).parent.parent / "utils"))
+# We'll import project modules lazily after dependency preflight to avoid immediate failures.
 
-from onedrive import OneDriveManager
-from database import DatabaseManager
+def _dependency_preflight(require_bundle: bool):
+    """Check that critical runtime/build dependencies are present before proceeding.
+
+    Returns (ok, problems_list). If require_bundle is True, also verify PyInstaller presence.
+    """
+    required = [
+        'pandas', 'dash', 'plotly', 'dash_cytoscape', 'reportlab', 'cairosvg'
+    ]
+    problems = []
+    for mod in required:
+        try:
+            __import__(mod)
+        except Exception as e:
+            problems.append(f"{mod} (import failed: {e}")
+    if require_bundle:
+        try:
+            import PyInstaller  # noqa: F401
+        except Exception:
+            problems.append('PyInstaller (module not found)')
+    return (len(problems) == 0, problems)
 
 def main():
     parser = argparse.ArgumentParser(description="Deploy Sign Estimation App to OneDrive")
@@ -34,6 +52,8 @@ def main():
                        help="Build PyInstaller console bundle (sign_estimator_console.spec) as well")
     parser.add_argument("--pyinstaller-extra", nargs=argparse.REMAINDER,
                        help="Extra args passed to pyinstaller after spec (advanced)")
+    parser.add_argument("--strict-bundle", action="store_true",
+                       help="Fail deployment if cytoscape assets still missing after auto-repair (prevents distributing broken bundle)")
     parser.add_argument("--backup-db", action="store_true", help="Create timestamped backup of existing remote DB before overwrite")
     parser.add_argument("--backup-retention", type=int, default=10, help="Number of recent DB backups to retain (default 10, 0 disables pruning)")
     parser.add_argument("--collect-logs", action="store_true", help="Copy *.log files to OneDrive logs folder and record summary")
@@ -42,8 +62,28 @@ def main():
     
     args = parser.parse_args()
     
-    # Initialize managers
     project_root = Path(__file__).parent.parent
+
+    # Dependency preflight
+    need_bundle = bool(args.bundle or args.bundle_console)
+    ok, probs = _dependency_preflight(require_bundle=need_bundle)
+    if not ok:
+        print('❌ Missing or broken dependencies:')
+        for p in probs:
+            print('   -', p)
+        print('\nRemediation (PowerShell):')
+        print('  python -m pip install --upgrade pip wheel setuptools')
+        if need_bundle:
+            print('  python -m pip install -r requirements-dev.txt')
+        else:
+            print('  python -m pip install -r requirements.txt')
+        return 3
+
+    # Safe to import now
+    sys.path.append(str(project_root / "utils"))
+    from onedrive import OneDriveManager  # type: ignore
+    from database import DatabaseManager  # type: ignore
+
     onedrive_manager = OneDriveManager(local_path=project_root)
     db_manager = DatabaseManager(str(project_root / "sign_estimation.db"))
     
@@ -143,9 +183,80 @@ def main():
                             _shutil.rmtree(target_dir)
                         _shutil.copytree(d, target_dir)
                         print(f"Copied bundle: {d.name} -> {target_dir}")
+            # Post-copy verification: dash_cytoscape/package.json presence
+            def _verify_dash_c(target_root: Path):
+                pkg = target_root / 'dash_cytoscape' / 'package.json'
+                return pkg.exists()
+            problems = []
+            for variant in ['sign_estimator','sign_estimator_console']:
+                bdir = bundle_target_root / variant
+                if bdir.exists():
+                    if _verify_dash_c(bdir):
+                        print(f"✅ cytoscape resources ok in {variant}")
+                    else:
+                        # Attempt auto-repair by copying from site-packages if available
+                        try:
+                            import importlib.util as _ilu, pathlib as _pl
+                            spec_dc = _ilu.find_spec('dash_cytoscape')
+                            if spec_dc and spec_dc.origin:
+                                src_dir = _pl.Path(spec_dc.origin).parent
+                                dst_dir = bdir / 'dash_cytoscape'
+                                dst_dir.mkdir(exist_ok=True)
+                                for fname in ['package.json','metadata.json']:
+                                    s = src_dir / fname
+                                    if s.exists():
+                                        _shutil.copy2(s, dst_dir / fname)
+                                # copy core js assets if missing
+                                for fname in ['dash_cytoscape.min.js','dash_cytoscape.dev.js','dash_cytoscape_extra.min.js','dash_cytoscape_extra.dev.js']:
+                                    s = src_dir / fname
+                                    if s.exists() and not (dst_dir / fname).exists():
+                                        _shutil.copy2(s, dst_dir / fname)
+                        except Exception as _fixerr:
+                            print(f"⚠️  Auto-repair attempt failed for {variant}: {_fixerr}")
+                        if _verify_dash_c(bdir):
+                            print(f"🛠️  Auto-repaired cytoscape resources in {variant}")
+                        else:
+                            problems.append(variant)
+            if problems:
+                print("❌ Missing dash_cytoscape/package.json in: " + ', '.join(problems))
+                print("   Remediation steps:")
+                print("     1) Close any running sign_estimator*.exe processes")
+                print("     2) Delete build/ and dist/ folders")
+                print("     3) (Optional) python -m pip install --upgrade dash-cytoscape")
+                print("     4) Re-run deploy with --bundle")
+                if args.strict_bundle:
+                    print("🚫 --strict-bundle enabled: aborting deployment due to incomplete bundle")
+                    return 2
+                else:
+                    print("   (Continuing without abort; affected bundles may degrade or stub metadata at runtime.)")
             print("✅ Bundle build/copy complete")
         except Exception as build_err:
             print(f"⚠️  Bundle build failed: {build_err}")
+
+    # Create / update deployment info with version stamp
+    try:
+        version_file = project_root / 'VERSION.txt'
+        version = version_file.read_text().strip() if version_file.exists() else '0.0.0'
+    except Exception:
+        version = '0.0.0'
+    # Augment deployment_info.json after deploy
+    try:
+        info_path = Path(onedrive_manager.onedrive_path) / 'deployment_info.json'
+        deployment_info = {}
+        if info_path.exists():
+            import json as _json
+            try:
+                deployment_info = _json.loads(info_path.read_text())
+            except Exception:
+                deployment_info = {}
+        deployment_info['version'] = version
+        deployment_info['deployed_at'] = datetime.datetime.utcnow().isoformat()+'Z'
+        deployment_info['platform'] = platform.system()
+        import json as _json
+        info_path.write_text(_json.dumps(deployment_info, indent=2))
+        print(f"📄 Deployment info updated (version {version})")
+    except Exception as _e:
+        print(f"⚠️  Could not write deployment info: {_e}")
 
     # Create startup scripts (enhanced version will detect bundle)
     print("Creating startup scripts...")

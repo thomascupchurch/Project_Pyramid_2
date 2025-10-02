@@ -1,0 +1,6 @@
+# Development / build requirements
+# Includes runtime requirements plus build-only tools (PyInstaller, pytest plugins, etc.)
+-r requirements.txt
+pyinstaller==6.11.0
+# Optional: speedups / utilities (uncomment as needed)
+# psutil>=5.9.0

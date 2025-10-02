@@ -12,6 +12,7 @@ dist/
 .venv/
 activate/
 wheelhouse/
+.venv-mac
 
 # Byte-compiled / optimized / DLL files
 *$py.class
