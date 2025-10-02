@@ -4148,16 +4148,21 @@ def health():
 
 # ------------------ Port Selection Helper ------------------ #
 def find_free_port(preferred: int) -> int:
+    """Attempt to claim a free port, incrementing if in use.
+
+    Bind on APP_HOST (not just 127.0.0.1) so conflicts for LAN host usage are detected.
+    """
     port = preferred
-    for _ in range(15):
+    host = APP_HOST or '127.0.0.1'
+    for _ in range(25):
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
             try:
-                s.bind(('127.0.0.1', port))
+                s.bind((host, port))
                 return port
             except OSError:
                 port += 1
-    return preferred  # fallback
+    return preferred  # fallback if all attempts fail
 
 if __name__ == "__main__":
     ensure_backup_dir()
@@ -4181,4 +4186,14 @@ if __name__ == "__main__":
                     print(f"[backup][warn] {e}")
                 time.sleep(AUTO_BACKUP_INTERVAL_SEC)
         threading.Thread(target=_auto_backup_loop, daemon=True).start()
-    app.run(debug=DASH_DEBUG, port=free_port, host=APP_HOST, use_reloader=False)
+    try:
+        app.run(debug=DASH_DEBUG, port=free_port, host=APP_HOST, use_reloader=False)
+    except Exception as e:  # noqa: BLE001
+        import traceback
+        from pathlib import Path as _P
+        logf = _P('startup_error.log')
+        try:
+            logf.write_text(f"Startup failure: {e}\n{traceback.format_exc()}\n")
+        except Exception:
+            pass
+        raise
