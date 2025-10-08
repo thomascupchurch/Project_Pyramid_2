@@ -5,6 +5,13 @@ A modern Python web application for sign manufacturing cost estimation and proje
 > macOS Support: The project now includes automatic OneDrive path detection on macOS (`~/Library/CloudStorage/OneDrive-*`) and a `start_app.sh` launcher with Homebrew guidance for enabling SVG/Cairo rendering.
 > Runtime Health: The app exposes `/health` returning JSON (status, version, python, frozen, cytoscape asset presence).
 
+> New Convenience Features (Oct 2025):
+> - Auto‑opens your default browser after a successful startup (PowerShell launcher)
+> - Optional `-NoBrowser` flag or `-Minimized` mode to suppress opening / output
+> - Desktop & Start Menu shortcut generator (`scripts/create_shortcuts.ps1`)
+> - Windows toast notification (if `win10toast` installed) showing the local URL
+> - Icon generation utility (`scripts/generate_icon.py`) to build `LSI_Logo.ico` from SVG
+
 ## 🎯 Features
 
 ### Core Functionality
@@ -172,6 +179,7 @@ Planned (optional) future expansions: multiple images per sign, export embedding
 | SIGN_APP_DB           | Path to DB file                         | sign_estimation.db |
 | SIGN_APP_PORT         | HTTP port                               | 8050               |
 | SIGN_APP_HOST         | Bind address (0.0.0.0 for LAN)          | 127.0.0.1          |
+| SIGN_APP_EXPECT_LAN   | Expect LAN access (warn if only localhost) | 0                  |
 | SIGN_APP_DEBUG        | Dash debug mode (1/true to enable)      | 0                  |
 | ONEDRIVE_SYNC_DIR     | Path to OneDrive sync folder (autosync) | (unset)            |
 | ONEDRIVE_AUTOSYNC_SEC | Autosync interval seconds               | 300                |
@@ -340,6 +348,64 @@ scripts\deploy_and_bundle.bat --pyinstaller-extra --clean
 
 If SmartScreen warns about the executable: choose “More info” → “Run anyway” (internal trusted tool).
 
+#### Auto Browser Launch & Flags (Windows PowerShell Launcher)
+
+The PowerShell launcher `start_app.ps1` now attempts to open your default browser once the `/health` endpoint returns 200.
+
+Flags / switches:
+
+| Switch        | Effect |
+| ------------- | ------ |
+| `-NoBrowser`  | Do not auto‑open the browser |
+| `-Minimized`  | Suppress most console output; server runs in a background PowerShell Job |
+| `-ForceReinstall` | Rebuild per‑user venv & reinstall dependencies |
+
+Environment overrides still work (e.g. `$env:SIGN_APP_PORT=8061; ./start_app.ps1`).
+
+Example minimized launch without browser:
+```
+./start_app.ps1 -NoBrowser -Minimized
+```
+
+#### Desktop / Start Menu Shortcuts
+
+Generate shortcuts (Desktop + Start Menu folder) pointing to the PowerShell launcher:
+```
+pwsh -ExecutionPolicy Bypass -File scripts/create_shortcuts.ps1
+```
+Options:
+```
+scripts/create_shortcuts.ps1 -Force       # recreate even if exists
+scripts/create_shortcuts.ps1 -NoBrowser   # embed -NoBrowser flag in shortcut
+scripts/create_shortcuts.ps1 -Minimized   # embed -Minimized flag in shortcut
+```
+Shortcuts use `assets/LSI_Logo.ico` if present (create with icon generator below).
+
+#### Icon Generation
+
+To convert the existing SVG logo to a multi‑resolution Windows icon:
+```
+python scripts/generate_icon.py
+```
+Outputs: `assets/LSI_Logo.ico` (sizes 16..256). Requires `cairosvg` + `Pillow` (both already in requirements).
+
+#### Windows Toast Notification
+
+If you add `win10toast` to `requirements.txt` (or pip install manually), a small toast will appear on successful startup:
+```
+pip install win10toast
+```
+Disable per run:
+```
+SET SIGN_APP_NO_TOAST=1 & start_app.bat
+```
+or in PowerShell:
+```
+$env:SIGN_APP_NO_TOAST=1; ./start_app.ps1
+```
+
+Toast is purely informational; absence of the package does not affect startup.
+
 ### Verifying a Deployment
 
 Run the lightweight validator locally or from inside the OneDrive deployment root:
@@ -376,6 +442,91 @@ Install these for full-feature export fidelity:
 | cairosvg  | SVG logo & SVG sign image rasterization for exports|
 | Pillow    | Image composition & PNG post-processing            |
 | openpyxl  | Excel export (already required)                    |
+
+Deployment Degraded Mode:
+
+If your deployment environment lacks native Cairo libraries (common on fresh Windows hosts), you can still deploy by passing `--allow-degraded` to `scripts/deploy.py` (or setting `SIGN_APP_ALLOW_DEGRADED=1`). In this mode:
+* Missing `cairosvg` or `reportlab` are treated as warnings.
+* PDF export or SVG rasterization features will be skipped / reduced.
+* Core application functionality remains unaffected.
+
+Example:
+```
+python scripts/deploy.py --bundle --allow-degraded
+```
+
+## 🛠 TROUBLESHOOTING
+
+### Native Cairo / SVG Rendering Issues
+
+Symptoms:
+* `cairosvg` import errors mentioning: `no library called "cairo-2" was found` or `libcairo-2.dll` missing.
+* PDF export works (reportlab) but embedded SVG logos/sign images are blank or replaced by fallback text.
+
+Why it happens:
+`cairosvg` relies on native Cairo graphics libraries. On a fresh Windows system those DLLs are not present. The Python wheel alone cannot rasterize SVG without them.
+
+Resolution Options (Windows):
+1. Provide a `cairo_runtime/` folder at project root containing required DLLs (common minimal set):
+   - `libcairo-2.dll`
+   - `libpng16-16.dll`
+   - `zlib1.dll`
+   - `libpixman-1-0.dll`
+   - `libfreetype-6.dll`
+   - (sometimes) `libfontconfig-1.dll`, `libexpat-1.dll`
+   The PowerShell launcher automatically prepends this folder to `PATH`.
+2. Install a GTK or MSYS2 runtime and add its `bin` directory to `PATH`.
+3. If SVG rasterization is not critical, deploy with:
+   ```
+   python scripts/deploy.py --bundle --allow-degraded
+   ```
+   and skip installing Cairo for now.
+
+macOS:
+```
+brew install cairo pango libffi pkg-config
+pip install --force-reinstall cairosvg
+```
+If still failing, ensure:
+```
+export DYLD_FALLBACK_LIBRARY_PATH="/opt/homebrew/lib:${DYLD_FALLBACK_LIBRARY_PATH}"
+```
+
+### Verifying Bundle Integrity
+
+After a build/deploy you can inspect cytoscape assets:
+```
+python scripts/verify_bundle.py
+python scripts/verify_bundle.py --json
+```
+Critical files (must exist): `dash_cytoscape/package.json` and the js assets.
+
+### Export Capability Summary
+
+`scripts/deploy.py` now prints a summary after bundling. Example statuses:
+| Feature | Meaning |
+| ------- | ------- |
+| ✅ OK | Feature fully enabled |
+| ❌ MISSING | Library missing; feature disabled |
+
+Enable everything:
+```
+python -m pip install reportlab cairosvg kaleido pillow openpyxl
+```
+
+### Common Deployment Pitfalls
+| Issue | Cause | Fix |
+|-------|------|-----|
+| Missing `dash_cytoscape/package.json` in bundle | PyInstaller data omission | Rebuild; use current spec (collect_all) or run auto-repair block in deploy script |
+| Browser not opening | `-NoBrowser` flag or minimized mode | Re-run without `-NoBrowser` |
+| Toast not showing | `win10toast` not installed | `pip install win10toast` or ignore |
+| PDF missing SVG graphics | Cairo libs absent | Provide DLLs or brew install cairo (mac), or accept degraded mode |
+
+### When to Use Strict Mode
+Use `--strict-bundle` to prevent distributing a bundle missing Cytoscape resources; deployment aborts if validation fails.
+
+### Degraded Mode Indicator
+If deployed with `--allow-degraded`, the post-build summary will list missing components. You can redeploy later after installing the libraries; no cleanup required beyond re-running the deploy command.
 
 If missing, a dismissible yellow banner lists them; core app still functions with graceful fallbacks.
 

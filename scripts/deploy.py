@@ -13,26 +13,38 @@ from pathlib import Path
 
 # We'll import project modules lazily after dependency preflight to avoid immediate failures.
 
-def _dependency_preflight(require_bundle: bool):
-    """Check that critical runtime/build dependencies are present before proceeding.
+def _dependency_preflight(require_bundle: bool, allow_degraded: bool):
+    """Check that dependencies are present.
 
-    Returns (ok, problems_list). If require_bundle is True, also verify PyInstaller presence.
+    Core (always required): pandas, dash, plotly, dash_cytoscape.
+    Extended (export/render): reportlab, cairosvg.
+
+    If allow_degraded True, missing extended deps become warnings not fatal.
+    Returns (ok, problems_list, warnings_list)
     """
-    required = [
-        'pandas', 'dash', 'plotly', 'dash_cytoscape', 'reportlab', 'cairosvg'
-    ]
+    core = ['pandas','dash','plotly','dash_cytoscape']
+    extended = ['reportlab','cairosvg']
     problems = []
-    for mod in required:
+    warnings = []
+    for mod in core:
         try:
             __import__(mod)
         except Exception as e:
             problems.append(f"{mod} (import failed: {e}")
+    for mod in extended:
+        try:
+            __import__(mod)
+        except Exception as e:
+            if allow_degraded:
+                warnings.append(f"{mod} (degraded: {e}")
+            else:
+                problems.append(f"{mod} (import failed: {e}")
     if require_bundle:
         try:
             import PyInstaller  # noqa: F401
         except Exception:
             problems.append('PyInstaller (module not found)')
-    return (len(problems) == 0, problems)
+    return (len(problems) == 0, problems, warnings)
 
 def main():
     parser = argparse.ArgumentParser(description="Deploy Sign Estimation App to OneDrive")
@@ -54,6 +66,8 @@ def main():
                        help="Extra args passed to pyinstaller after spec (advanced)")
     parser.add_argument("--strict-bundle", action="store_true",
                        help="Fail deployment if cytoscape assets still missing after auto-repair (prevents distributing broken bundle)")
+    parser.add_argument("--allow-degraded", action="store_true",
+                       help="Allow deployment to proceed even if optional export libs (cairosvg/reportlab) missing; features will be degraded")
     parser.add_argument("--backup-db", action="store_true", help="Create timestamped backup of existing remote DB before overwrite")
     parser.add_argument("--backup-retention", type=int, default=10, help="Number of recent DB backups to retain (default 10, 0 disables pruning)")
     parser.add_argument("--collect-logs", action="store_true", help="Copy *.log files to OneDrive logs folder and record summary")
@@ -66,8 +80,9 @@ def main():
 
     # Dependency preflight
     need_bundle = bool(args.bundle or args.bundle_console)
-    ok, probs = _dependency_preflight(require_bundle=need_bundle)
-    if not ok:
+    allow_degraded = bool(args.allow_degraded or os.environ.get('SIGN_APP_ALLOW_DEGRADED'))
+    ok, probs, warns = _dependency_preflight(require_bundle=need_bundle, allow_degraded=allow_degraded)
+    if probs:
         print('❌ Missing or broken dependencies:')
         for p in probs:
             print('   -', p)
@@ -77,7 +92,13 @@ def main():
             print('  python -m pip install -r requirements-dev.txt')
         else:
             print('  python -m pip install -r requirements.txt')
+        if allow_degraded:
+            print('(Degraded allowed, but core failures prevent deploy.)')
         return 3
+    if warns:
+        print('⚠️  Proceeding in degraded mode (some export features disabled):')
+        for w in warns:
+            print('   -', w)
 
     # Safe to import now
     sys.path.append(str(project_root / "utils"))
@@ -230,6 +251,42 @@ def main():
                 else:
                     print("   (Continuing without abort; affected bundles may degrade or stub metadata at runtime.)")
             print("✅ Bundle build/copy complete")
+            # Post-build export capability summary
+            print("\n📦 Export Capability Summary:")
+            def _probe(name, import_name=None, extra_check=None):
+                mod = import_name or name
+                try:
+                    __import__(mod)
+                    if extra_check:
+                        return extra_check()
+                    return True, None
+                except Exception as e:  # noqa: BLE001
+                    return False, str(e)
+            capabilities = []
+            report_items = [
+                ("PDF Export (reportlab)", "reportlab"),
+                ("SVG Rasterization (cairosvg)", "cairosvg"),
+                ("Static Plotly Image (kaleido)", "kaleido"),
+                ("Image Processing (Pillow)", "PIL"),
+                ("Excel Export (openpyxl)", "openpyxl"),
+            ]
+            for label, mod in report_items:
+                ok, err = _probe(mod)
+                status = "OK" if ok else "MISSING"
+                capabilities.append((label, status, err))
+            width = max(len(c[0]) for c in capabilities) + 2
+            for label, status, err in capabilities:
+                if status == "OK":
+                    print(f"  - {label.ljust(width)}: ✅ {status}")
+                else:
+                    short = (err or "").split('\n')[0][:80]
+                    print(f"  - {label.ljust(width)}: ❌ {status} ({short})")
+            degraded = [c for c in capabilities if c[1] != 'OK']
+            if degraded:
+                print("\n⚠️  One or more export features unavailable. Core estimating still functions.")
+                print("   To enable all features install missing libs and re-run deploy:")
+                print("   python -m pip install reportlab cairosvg kaleido pillow openpyxl")
+                print("   (Cairo native DLLs may be required for cairosvg on Windows.)")
         except Exception as build_err:
             print(f"⚠️  Bundle build failed: {build_err}")
 

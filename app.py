@@ -6,6 +6,7 @@ A modern Python web application for sign manufacturing cost estimation and proje
 import os
 import sys
 import socket
+import threading
 import dash
 from dash import html, dcc, Input, Output, State, callback_context, dash_table
 import dash_bootstrap_components as dbc
@@ -176,6 +177,7 @@ def health_route():  # type: ignore
             'db_size_bytes': size,
             'svg_status': os.environ.get('SIGN_APP_SVG_STATUS'),
             'env_mismatch': os.environ.get('SIGN_APP_ENV_MISMATCH'),
+            'lan_status': os.environ.get('SIGN_APP_LAN_STATUS'),
             'cwd': str(Path.cwd()),
             'frozen': frozen,
             'dash_cytoscape_package_json': cyto_pkg_json
@@ -213,6 +215,58 @@ def _interpreter_sanity():
         print(f"[startup][env][warn] mismatch detection failed: {e}")
 
 _interpreter_sanity()
+
+# -------------------- LAN binding expectation check -------------------- #
+def _lan_binding_expectation_check():
+    """Warn if the app appears to be bound only to localhost while user expects LAN access.
+
+    Triggered when user sets SIGN_APP_EXPECT_LAN=1 (or true/yes) but APP_HOST resolves
+    to a loopback-only address (127.x, ::1, localhost). We don't force-bind; just warn.
+    Stores a concise status string in SIGN_APP_LAN_STATUS for /health and UI callbacks.
+    """
+    expect = os.getenv('SIGN_APP_EXPECT_LAN', '').lower() in {'1','true','yes','on'}
+    host = APP_HOST or '127.0.0.1'
+    status = 'unset'
+    if expect:
+        # Detect loopback style host values
+        loopback_tokens = {'127.0.0.1','localhost','::1'}
+        is_loopback = host in loopback_tokens or host.startswith('127.')
+        if is_loopback:
+            status = 'mismatch-local-only'
+            print('[startup][lan][warn] SIGN_APP_EXPECT_LAN is set but SIGN_APP_HOST is loopback-only. '\
+                  'Remote machines will NOT reach the app. Set SIGN_APP_HOST=0.0.0.0 (or the LAN IP) and restart.')
+        else:
+            status = 'ok-lan-enabled'
+    else:
+        # Not expecting LAN; report whether we *are* exposing widely
+        if host in {'0.0.0.0','::','::0'}:
+            status = 'lan-exposed-no-expect'
+        else:
+            status = 'local-only'
+    os.environ['SIGN_APP_LAN_STATUS'] = status
+
+_lan_binding_expectation_check()
+
+# -------------------- Optional toast notification (Windows) -------------------- #
+def _notify_start(port: int):
+    if os.name != 'nt':
+        return
+    if os.environ.get('SIGN_APP_NO_TOAST'):
+        return
+    try:
+        from win10toast import ToastNotifier  # type: ignore
+        title = "Sign Estimator Running"
+        msg = f"Listening on http://127.0.0.1:{port}".replace('127.0.0.1', os.environ.get('SIGN_APP_HOST','127.0.0.1'))
+        # Use a short timeout; run in thread so we don't block dash
+        def _toast():
+            try:
+                ToastNotifier().show_toast(title, msg, duration=5, threaded=True)
+            except Exception:
+                pass
+        threading.Thread(target=_toast, daemon=True).start()
+    except Exception:
+        # Silently ignore if library not installed
+        pass
 
 # Removed _cairosvg_probe (previously set SIGN_APP_SVG_STATUS) as banners were eliminated.
 
@@ -4174,6 +4228,10 @@ def start_server():
     print("[startup] Starting Dash server ...")
     print(f"[startup] Database path: {DATABASE_PATH}")
     print(f"[startup] Open browser at: http://{APP_HOST}:{free_port}")
+    try:
+        _notify_start(free_port)
+    except Exception:
+        pass
     if AUTO_BACKUP_INTERVAL_SEC > 0:
         print(f"[startup] Auto backup every {AUTO_BACKUP_INTERVAL_SEC}s -> {BACKUP_DIR}")
         import threading, time, shutil

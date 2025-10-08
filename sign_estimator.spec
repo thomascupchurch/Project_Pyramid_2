@@ -61,36 +61,28 @@ if assets_dir.exists():
 if logo_file.exists():
     datas.append((str(logo_file), '.'))
 
-pkg_path = None
-try:
-    # Include full dash_cytoscape package to guarantee resource availability
-    spec_dash_c = importlib.util.find_spec('dash_cytoscape')
-    if spec_dash_c and spec_dash_c.origin:
-        import pathlib
-        pkg_path = pathlib.Path(spec_dash_c.origin).parent
-        datas.append((str(pkg_path), 'dash_cytoscape'))
-except Exception as _e_pkg:
-    print(f"[spec][warn] locating dash_cytoscape failed: {_e_pkg}")
+pkg_path = None  # no manual directory copy; rely on collect_all
 
 # Merge collect_all datas after manual additions to avoid duplicates; PyInstaller tolerates duplicates.
 try:
     for _src, _tgt in _cy_d:  # type: ignore
-        # Normalise single file vs directory entries
         datas.append((_src, _tgt))
 except Exception:
     pass
 
 # Force include specific cytoscape key files even if directory copy misbehaves
-if pkg_path:
-    for _fn in ['package.json', 'metadata.json', 'dash_cytoscape.min.js',
-                'dash_cytoscape.dev.js', 'dash_cytoscape_extra.min.js',
-                'dash_cytoscape_extra.dev.js']:
-        try:
-            _fpath = pkg_path / _fn
-            if _fpath.exists():
-                datas.append((str(_fpath), f'dash_cytoscape/{_fn}'))
-        except Exception:
-            pass
+## Removed explicit dash_cytoscape file forcing; collect_all already supplies these
+
+# ---------------- Deduplicate datas to avoid file/directory collision ----------------
+_seen = set()
+_deduped = []
+for _src, _tgt in datas:
+    key = (_src, _tgt)
+    if key in _seen:
+        continue
+    _seen.add(key)
+    _deduped.append((_src, _tgt))
+datas = _deduped
 
 # Add runtime hook to create stub package.json if still missing at startup
 runtime_hook_dir = project_root / 'runtime_hooks'
