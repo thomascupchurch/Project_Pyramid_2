@@ -187,6 +187,8 @@ Planned (optional) future expansions: multiple images per sign, export embedding
 | CAIROSVG_BACKEND      | Force cairosvg backend (e.g. pycairo)    | (unset)            |
 | DISABLE_SVG_RENDER    | Skip SVG rasterization (fallback header) | 0                  |
 
+When `SIGN_APP_EXPECT_LAN=1` and `SIGN_APP_HOST` is non-loopback (e.g. `0.0.0.0`), the Windows launcher (`start_app.ps1`) will invoke `scripts/ensure_firewall_rule.ps1` to check for an inbound allow rule on the selected port. If none is found you will be prompted to create one (or you can run it later with `-Auto`). This helps first‑time LAN sharing without manually opening Windows Defender Firewall.
+
 ### SVG Rendering (Cairo) on Windows & macOS
 
 The PDF export attempts to rasterize SVG logos and sign images via `cairosvg`. On Windows this requires Cairo native DLLs. If they are missing you will see warnings in `scripts/verify_env.py` like:

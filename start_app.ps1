@@ -181,6 +181,28 @@ if ($Minimized) {
   # Start the server in a background job to allow browser open without clutter
   Start-Job -ScriptBlock { param($py) & $py run_server.py } -ArgumentList $VenvPy | Out-Null
 } else {
+  # Optional: if expecting LAN access, ensure firewall rule exists
+  $expectLan = $env:SIGN_APP_EXPECT_LAN -and ($env:SIGN_APP_EXPECT_LAN.ToLower() -in @('1','true','yes','on'))
+  $bindHost = if($env:SIGN_APP_HOST){ $env:SIGN_APP_HOST } else { '127.0.0.1' }
+  if($expectLan){
+    if($bindHost -in @('127.0.0.1','localhost','::1') -or $bindHost.StartsWith('127.')){
+      Write-Host "[lan][warn] SIGN_APP_EXPECT_LAN set but SIGN_APP_HOST is $bindHost (loopback). Remote users cannot connect." -ForegroundColor Yellow
+      Write-Host "         Set SIGN_APP_HOST=0.0.0.0 and re-run to expose on LAN." -ForegroundColor Yellow
+    } else {
+      # Call firewall ensure script (non-fatal on failure)
+      $fwScript = Join-Path $ScriptDir 'scripts/ensure_firewall_rule.ps1'
+      if(Test-Path $fwScript){
+        try {
+          # Run in-process so prompt shows here
+          & powershell -ExecutionPolicy Bypass -File $fwScript -Port $Port -Program $VenvPy
+        } catch {
+          Write-Host "[lan][warn] Firewall rule helper failed: $($_.Exception.Message)" -ForegroundColor Yellow
+        }
+      } else {
+        Write-Host "[lan][info] Firewall helper script not found (skipping)" -ForegroundColor DarkGray
+      }
+    }
+  }
   & $VenvPy run_server.py
 }
 $code = $LASTEXITCODE

@@ -1,0 +1,75 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>Allow LAN Access for Sign Estimation App (Admin One‑Pager)</title>
+<style>
+  :root{ --fg:#111; --muted:#555; --accent:#0a6; --border:#ddd; }
+  body{ font-family: -apple-system, BlinkMacSystemFont, Segoe UI, Roboto, Helvetica, Arial, sans-serif; color:var(--fg); margin: 32px; line-height:1.5; }
+  h1{ font-size: 22px; margin: 0 0 10px; }
+  h2{ font-size: 16px; margin: 20px 0 8px; }
+  p,li,pre,code{ font-size: 13px; }
+  code{ background: #f7f7f7; padding: 2px 4px; border-radius: 3px; }
+  pre{ background:#fbfbfb; border:1px solid var(--border); padding:10px; border-radius:6px; overflow:auto; }
+  .meta{ color:var(--muted); margin-bottom: 12px; }
+  .box{ border:1px solid var(--border); border-radius:8px; padding:12px; }
+  ul{ margin-top:6px; }
+  .small{ font-size: 12px; color:var(--muted); }
+  @media print{ body{ margin:12mm; } a{ color:inherit; text-decoration:none; } }
+</style>
+</head>
+<body>
+  <h1>Allow LAN Access for Sign Estimation App (Admin One‑Pager)</h1>
+  <div class="meta">Purpose: Enable coworkers to reach a local internal web app on a user’s Windows PC over the LAN (default TCP 8050).</div>
+
+  <div class="box">
+    <p><strong>Why</strong>: Windows Defender Firewall blocks inbound traffic by default. A single inbound allow rule (Domain/Private only) is required.</p>
+    <p><strong>Scope & Safety</strong>:
+      <ul>
+        <li>Profiles: Domain, Private (not Public)</li>
+        <li>Protocol/Port: TCP 8050 (configurable)</li>
+        <li>Optional: restrict to program path and/or corporate subnets</li>
+        <li>Reversible: remove rule any time</li>
+      </ul>
+    </p>
+  </div>
+
+  <h2>Option A – Local rule (single machine)</h2>
+  <p>Run PowerShell as Administrator:</p>
+  <pre><code>New-NetFirewallRule -DisplayName "SignEstimator Inbound" `
+  -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8050 `
+  -Profile Domain,Private</code></pre>
+
+  <p>Optional: restrict to program path:</p>
+  <pre><code>New-NetFirewallRule -DisplayName "SignEstimator Inbound" `
+  -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8050 `
+  -Program "C:\\Users\\&lt;USER&gt;\\AppData\\Local\\SignEstimator\\venv\\Scripts\\python.exe" `
+  -Profile Domain,Private</code></pre>
+
+  <p>Optional: restrict to corp subnets:</p>
+  <pre><code>New-NetFirewallRule -DisplayName "SignEstimator Inbound" `
+  -Direction Inbound -Action Allow -Protocol TCP -LocalPort 8050 `
+  -RemoteAddress 10.0.0.0/8,192.168.0.0/16 `
+  -Profile Domain,Private</code></pre>
+
+  <p>Command Prompt (Admin) alternative:</p>
+  <pre><code>netsh advfirewall firewall add rule name="SignEstimator Inbound" dir=in action=allow protocol=TCP localport=8050 profile=Domain,Private</code></pre>
+
+  <p>Verification:</p>
+  <pre><code>Get-NetFirewallRule -DisplayName "SignEstimator Inbound" `
+  | Get-NetFirewallPortFilter | Format-Table -AutoSize</code></pre>
+
+  <p>Removal:</p>
+  <pre><code>Get-NetFirewallRule -DisplayName "SignEstimator Inbound" | Remove-NetFirewallRule</code></pre>
+
+  <h2>Option B – Central (Group Policy)</h2>
+  <ul>
+    <li>Path: Computer Configuration &gt; Policies &gt; Windows Settings &gt; Security Settings &gt; Windows Defender Firewall with Advanced Security &gt; Inbound Rules</li>
+    <li>Create Rule: Name SignEstimator Inbound, Inbound/Allow, TCP/Local Port 8050, Profiles Domain &amp; Private</li>
+    <li>Optional: Programs and Services → program path; Scope → corporate subnets</li>
+  </ul>
+
+  <p class="small">Notes: Users can run locally without LAN access (127.0.0.1). This rule only enables coworkers to reach http://&lt;host-ip&gt;:8050 on the internal network. A helper script (scripts/ensure_firewall_rule.ps1) can check/create the rule when run elevated.</p>
+</body>
+</html>
