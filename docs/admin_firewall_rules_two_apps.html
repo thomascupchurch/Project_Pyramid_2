@@ -1,0 +1,68 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Windows Defender Firewall: Allow Rules for Two Local Apps</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font-family: Segoe UI, Roboto, Arial, sans-serif; margin: 24px; color: #222; }
+    h1 { font-size: 20px; margin-bottom: 8px; }
+    h2 { font-size: 16px; margin-top: 20px; }
+    code, pre { background: #f6f8fa; padding: 2px 4px; border-radius: 4px; }
+    .small { color: #555; font-size: 12px; }
+    ol, ul { padding-left: 20px; }
+    .box { border: 1px solid #ddd; padding: 12px; border-radius: 6px; background: #fff; }
+    .footer { margin-top: 24px; font-size: 12px; color: #666; }
+  </style>
+  </head>
+<body>
+  <h1>Windows Defender Firewall: Allow Rules for Two Local Apps</h1>
+  <p class="small">Audience: IT administrators managing Windows Defender Firewall on a domain-joined workstation. Purpose: enable inbound TCP access over LAN for two internal web apps hosted on the same machine.</p>
+
+  <div class="box">
+    <h2>Summary</h2>
+    <ul>
+      <li>Create inbound allow rules for each app's port (Domain/Private profiles). Example ports: <code>8050</code> and <code>8060</code>.</li>
+      <li>Optionally scope by program path to the app launcher or <code>python.exe</code>.</li>
+      <li>Confirm listeners and verify rule hit using <code>Test-NetConnection</code> and <code>netstat</code>.</li>
+    </ul>
+  </div>
+
+  <h2>1) Identify host and ports</h2>
+  <ul>
+    <li>Host: the workstation's IPv4 address on the LAN (example: <code>172.16.1.155</code>).</li>
+    <li>App A (Estimator): TCP <code>8050</code>.</li>
+    <li>App B (Second App): TCP <code>8060</code>.</li>
+  </ul>
+
+  <h2>2) Create inbound allow rules (ports)</h2>
+  <ol>
+    <li>Open Windows Defender Firewall with Advanced Security</li>
+    <li>Inbound Rules → New Rule… → <strong>Port</strong> → TCP → Specific local ports: <code>8050</code> → <strong>Allow</strong> → Profiles: <strong>Domain</strong> and <strong>Private</strong> → Name: <em>"Sign Estimation App (TCP 8050)"</em></li>
+    <li>Repeat for <code>8060</code>: Name: <em>"Sign Estimation App B (TCP 8060)"</em></li>
+  </ol>
+
+  <h2>3) Optional program scoping (advanced)</h2>
+  <p>Instead of a port-based rule, use a Program rule and point to the launcher or <code>python.exe</code> used to run the app. This can reduce surface area but may require updates when paths change.</p>
+
+  <h2>4) Verification</h2>
+  <ul>
+    <li>Ensure the apps are listening on their ports (the launcher can show this). From another LAN host:</li>
+    <li><code>Test-NetConnection 172.16.1.155 -Port 8050</code></li>
+    <li><code>Test-NetConnection 172.16.1.155 -Port 8060</code></li>
+    <li>Expect <code>TcpTestSucceeded: True</code> when rules and listeners are in place.</li>
+  </ul>
+
+  <h2>5) Change management</h2>
+  <ul>
+    <li>Rules apply only to Domain and Private profiles. Not exposed on Public.</li>
+    <li>If ports or executables change, update the rules accordingly.</li>
+  </ul>
+
+  <h2>Appendix: netsh alternative</h2>
+  <pre>netsh advfirewall firewall add rule name="Sign Estimation App (TCP 8050)" dir=in action=allow protocol=TCP localport=8050 profile=domain,private
+netsh advfirewall firewall add rule name="Sign Estimation App B (TCP 8060)" dir=in action=allow protocol=TCP localport=8060 profile=domain,private</pre>
+
+  <div class="footer">This document is generated from the repository's docs folder. Contact the app maintainer for support.</div>
+</body>
+</html>

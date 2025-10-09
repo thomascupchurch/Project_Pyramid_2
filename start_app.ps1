@@ -23,12 +23,32 @@ param(
   [switch]$ForceReinstall,
   [switch]$HideEnvNotice,
   [switch]$NoBrowser,
-  [switch]$Minimized
+  [switch]$Minimized,
+  [switch]$AdminPDF
 )
 
 # Resolve script directory & switch
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 Set-Location $ScriptDir
+
+# If requested, generate the Admin Firewall One-Pager PDF and exit
+if($AdminPDF){
+  try {
+    $exporter = Join-Path $ScriptDir 'scripts/export_admin_onepager_pdf.ps1'
+    if(Test-Path $exporter){
+      Write-Host '[admin-pdf] Generating admin one-pager PDF...' -ForegroundColor Cyan
+      & powershell -ExecutionPolicy Bypass -File $exporter
+      Write-Host '[admin-pdf] Done.' -ForegroundColor Green
+      exit 0
+    } else {
+      Write-Host '[admin-pdf] Export script not found.' -ForegroundColor Yellow
+      exit 1
+    }
+  } catch {
+    Write-Host "[admin-pdf][error] $($_.Exception.Message)" -ForegroundColor Red
+    exit 1
+  }
+}
 
 # ---------------------------------------------------------------
 # Bundle preference & health validation
@@ -183,7 +203,8 @@ if ($Minimized) {
 } else {
   # Optional: if expecting LAN access, ensure firewall rule exists
   $expectLan = $env:SIGN_APP_EXPECT_LAN -and ($env:SIGN_APP_EXPECT_LAN.ToLower() -in @('1','true','yes','on'))
-  $bindHost = if($env:SIGN_APP_HOST){ $env:SIGN_APP_HOST } else { '127.0.0.1' }
+  # Default to 0.0.0.0 to match config.py's APP_HOST when env var is not set
+  $bindHost = if($env:SIGN_APP_HOST){ $env:SIGN_APP_HOST } else { '0.0.0.0' }
   if($expectLan){
     if($bindHost -in @('127.0.0.1','localhost','::1') -or $bindHost.StartsWith('127.')){
       Write-Host "[lan][warn] SIGN_APP_EXPECT_LAN set but SIGN_APP_HOST is $bindHost (loopback). Remote users cannot connect." -ForegroundColor Yellow

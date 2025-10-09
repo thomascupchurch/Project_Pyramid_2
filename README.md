@@ -11,6 +11,8 @@ A modern Python web application for sign manufacturing cost estimation and proje
 > - Desktop & Start Menu shortcut generator (`scripts/create_shortcuts.ps1`)
 > - Windows toast notification (if `win10toast` installed) showing the local URL
 > - Icon generation utility (`scripts/generate_icon.py`) to build `LSI_Logo.ico` from SVG
+- Admin one‑pager exporter to PDF (`scripts/export_admin_onepager_pdf.ps1`) and a two‑apps variant (`scripts/export_admin_twoapps_pdf.ps1`)
+- Dual‑launch helper to start two app instances (`start_both_apps.ps1`)
 
 ## 🎯 Features
 
