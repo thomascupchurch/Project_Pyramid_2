@@ -11,7 +11,12 @@ import dash
 from dash import html, dcc, Input, Output, State, callback_context, dash_table
 import dash_bootstrap_components as dbc
 import plotly.graph_objects as go
-import plotly.express as px
+# Plotly Express requires numpy; import lazily/optionally to allow degraded mode without numpy
+try:
+    import plotly.express as px  # noqa: F401
+except Exception as _px_err:
+    px = None  # type: ignore
+    print(f"[startup][degraded] plotly.express unavailable: {_px_err}. Continuing without px.")
 import importlib.util as _ilu_cyto, importlib.metadata as _imd_cyto, json as _json_cyto, pathlib as _pl_cyto
 def _import_cyto_with_stub():
     try:
