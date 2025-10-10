@@ -47,6 +47,22 @@ A modern Python web application for sign manufacturing cost estimation and proje
 
 ## 🚀 Quick Start
 
+### Click‑to‑Run (OneDrive) for Coworkers
+
+If this folder lives in OneDrive and you just want to open the app on your own machine (no special setup):
+
+1. Open the shared OneDrive folder containing this project
+2. Double‑click either of these:
+   - start_app.ps1 (PowerShell) — preferred for best experience
+   - start_app.bat (classic CMD)
+3. Your default browser will open to http://localhost:8050
+
+Notes:
+- No admin rights needed
+- No firewall changes are required for local use
+- The first launch may take a bit longer while dependencies are prepared per‑user
+- Optional: create Desktop/Start‑Menu shortcuts by running: powershell -ExecutionPolicy Bypass -File scripts/create_shortcuts.ps1
+
 ### macOS Quick Start (TL;DR)
 
 ```bash
@@ -189,7 +205,7 @@ Planned (optional) future expansions: multiple images per sign, export embedding
 | CAIROSVG_BACKEND      | Force cairosvg backend (e.g. pycairo)    | (unset)            |
 | DISABLE_SVG_RENDER    | Skip SVG rasterization (fallback header) | 0                  |
 
-When `SIGN_APP_EXPECT_LAN=1` and `SIGN_APP_HOST` is non-loopback (e.g. `0.0.0.0`), the Windows launcher (`start_app.ps1`) will invoke `scripts/ensure_firewall_rule.ps1` to check for an inbound allow rule on the selected port. If none is found you will be prompted to create one (or you can run it later with `-Auto`). This helps first‑time LAN sharing without manually opening Windows Defender Firewall.
+For local use via OneDrive, you can ignore network and firewall settings entirely. Advanced options for LAN access are supported but not required for personal/local operation.
 
 ### SVG Rendering (Cairo) on Windows & macOS
 
