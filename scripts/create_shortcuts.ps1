@@ -1,23 +1,31 @@
-<#!
+<#
 Creates Desktop and Start Menu shortcuts for the Sign Estimation App launcher.
 Usage:
-  powershell -ExecutionPolicy Bypass -File .\scripts\create_shortcuts.ps1 [-Force] [-NoBrowser]
+  powershell -ExecutionPolicy Bypass -File .\scripts\create_shortcuts.ps1 [-Force] [-NoBrowser] [-Minimized] [-ExeTarget]
 Options:
   -Force      Recreate shortcuts even if they already exist.
   -NoBrowser  Adds -NoBrowser flag to shortcut target to suppress auto-open.
   -Minimized  Launch minimized (suppresses most console output).
-!>
+  -ExeTarget  Point shortcut directly to the packaged EXE if present.
+#>
 param(
   [switch]$Force,
   [switch]$NoBrowser,
-  [switch]$Minimized
+  [switch]$Minimized,
+  [switch]$ExeTarget
 )
 
 $ErrorActionPreference = 'Stop'
 $ScriptDir = Split-Path -Parent $MyInvocation.MyCommand.Path
 $Root = Split-Path -Parent $ScriptDir
 $Launcher = Join-Path $Root 'start_app.ps1'
-if (-not (Test-Path $Launcher)) { Write-Host "start_app.ps1 not found at $Launcher" -ForegroundColor Red; exit 1 }
+$ExePathCandidates = @(
+  (Join-Path $Root 'dist/sign_estimator.exe'),
+  (Join-Path $Root 'dist/sign_estimator/sign_estimator.exe')
+)
+$ExePath = $null
+foreach ($cand in $ExePathCandidates) { if (Test-Path $cand) { $ExePath = $cand; break } }
+if (-not (Test-Path $Launcher)) { Write-Host "start_app.ps1 not found at $Launcher" -ForegroundColor Red }
 
 $Shell = New-Object -ComObject WScript.Shell
 $Desktop = [Environment]::GetFolderPath('Desktop')
@@ -44,9 +52,16 @@ function New-AppShortcut {
   }
   if (Test-Path $Path) { Remove-Item $Path -Force }
   $sc = $Shell.CreateShortcut($Path)
-  $psExe = (Get-Command powershell.exe).Source
-  $sc.TargetPath = $psExe
-  $sc.Arguments = "-ExecutionPolicy Bypass -NoLogo -NoProfile -File `"$Launcher`" $FlagString"
+  if ($ExeTarget -and (Test-Path $ExePath)) {
+    # Shortcut directly to packaged EXE
+    $sc.TargetPath = $ExePath
+    $sc.Arguments = ''
+  } else {
+    # Fallback: use PowerShell launcher
+    $psExe = (Get-Command powershell.exe).Source
+    $sc.TargetPath = $psExe
+    $sc.Arguments = "-ExecutionPolicy Bypass -NoLogo -NoProfile -File `"$Launcher`" $FlagString"
+  }
   $sc.Description = $Description
   if ($IconCandidate) { $sc.IconLocation = $IconCandidate }
   $sc.WorkingDirectory = $Root

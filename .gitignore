@@ -38,6 +38,7 @@ pytestdebug.log
 # Logs & temp
 *.log
 logs/
+build_log.txt
 *.tmp
 *.swp
 *.bak

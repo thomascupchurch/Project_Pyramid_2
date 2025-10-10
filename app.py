@@ -147,7 +147,24 @@ def ensure_extended_schema():
 ensure_extended_schema()
 
 # Dash app
-app = dash.Dash(__name__, external_stylesheets=[dbc.themes.BOOTSTRAP], suppress_callback_exceptions=True)
+def _resolve_assets_folder() -> str | None:
+    try:
+        if getattr(sys, 'frozen', False) and hasattr(sys, '_MEIPASS'):
+            p = Path(getattr(sys, '_MEIPASS')) / 'assets'
+            if p.exists():
+                return str(p)
+        # Fallback to project assets in dev/run-from-source
+        p2 = Path(__file__).parent / 'assets'
+        return str(p2) if p2.exists() else None
+    except Exception:
+        return None
+
+app = dash.Dash(
+    __name__,
+    external_stylesheets=[dbc.themes.BOOTSTRAP],
+    suppress_callback_exceptions=True,
+    assets_folder=_resolve_assets_folder()
+)
 app.title = "Sign Package Estimator"
 
 # Expose a lightweight /health endpoint for remote diagnostics
