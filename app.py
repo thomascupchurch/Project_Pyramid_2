@@ -120,7 +120,8 @@ onedrive_manager = OneDriveManager(Path.cwd())
 
 def ensure_extended_schema():
     try:
-        conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+        conn = get_connection()
+        cur = conn.cursor()
         cur.execute("PRAGMA table_info('sign_types')"); cols = {r[1] for r in cur.fetchall()}
         if 'material_alt' not in cols:
             try: cur.execute("ALTER TABLE sign_types ADD COLUMN material_alt TEXT")
@@ -579,7 +580,7 @@ if ONEDRIVE_SYNC_DIR and ONEDRIVE_AUTOSYNC_SEC > 0:
 # Attempt secondary import from Book2.csv if dataset appears empty/minimal
 def _attempt_import_book2():
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         cur = conn.cursor()
         cur.execute("SELECT COUNT(*) FROM sign_types")
         count = cur.fetchone()[0]
@@ -615,7 +616,8 @@ def _attempt_import_book2():
                 ppsf = 0.0
             records.append((name[:120], '', 0.0, material[:120], ppsf, float(width or 0), float(height or 0)))
         if records:
-            conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+            conn = get_connection()
+            cur = conn.cursor()
             cur.executemany('''INSERT OR IGNORE INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height) VALUES (?,?,?,?,?,?,?)''', records)
             conn.commit(); conn.close()
             print(f"[startup] Imported {len(records)} records from Book2.csv")
@@ -982,7 +984,7 @@ def render_active_tab(tab_id, role):
 def get_project_tree_data():
     nodes = []
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         projects_df = pd.read_sql_query("SELECT id, name FROM projects", conn)
         for _, p in projects_df.iterrows():
             pid = f"project_{p['id']}"; nodes.append({'id':pid,'label':p['name'],'type':'project','level':0})
@@ -1035,7 +1037,7 @@ def safe_tree_figure():
 def render_projects_tab():
     """Render the projects management tab."""
     # Load current projects for initial render
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     df = pd.read_sql_query("SELECT id, name, created_date FROM projects ORDER BY id DESC", conn)
     conn.close()
     if df.empty:
@@ -1259,7 +1261,7 @@ def render_signs_tab():
     """Render the sign types management tab."""
     # Preload current sign_types so the table isn't empty if callback hasn't fired yet
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         preload_df = pd.read_sql_query(
             "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name",
             conn
@@ -1399,7 +1401,7 @@ def render_signs_tab():
 def render_groups_tab():
     """Render the sign groups management tab."""
     # Preload sign types & groups
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     sign_types_df = pd.read_sql_query("SELECT id, name FROM sign_types ORDER BY name", conn)
     groups_df = pd.read_sql_query("SELECT id, name FROM sign_groups ORDER BY name", conn)
     conn.close()
@@ -1466,7 +1468,7 @@ def render_groups_tab():
 def render_building_tab():
     """Render dedicated building view and sign management."""
     # Preload project options
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     pdf = pd.read_sql_query('SELECT id, name FROM projects ORDER BY name', conn)
     conn.close()
     project_options = ([{'label': r.name, 'value': r.id} for r in pdf.itertuples()]) if not pdf.empty else []
@@ -1561,7 +1563,7 @@ def render_building_tab():
 def render_estimates_tab():
     """Render the cost estimation and export tab."""
     # Populate project options fresh on each render
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     df = pd.read_sql_query("SELECT id, name FROM projects ORDER BY name", conn)
     bdf = pd.read_sql_query("SELECT b.id, b.name, b.project_id, p.name as project_name FROM buildings b JOIN projects p ON b.project_id=p.id ORDER BY p.name, b.name", conn)
     conn.close()
@@ -3554,12 +3556,12 @@ def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
     records = df.to_dict('records')
     return records, '', records
     if 'add-sign-btn' in triggered:
-        rows = data_rows or []
-        rows.append({"name":"","description":"","unit_price":0,"material":"","price_per_sq_ft":0,"width":0,"height":0})
+    rows = []
+    rows.append({"name":"","description":"","unit_price":0,"material":"","price_per_sq_ft":0,"width":0,"height":0})
     return rows, 'New row added', rows
     if 'signs-table' in triggered and active_tab == 'signs-tab':
-        rows = data_rows or []
-        conn = sqlite3.connect(DATABASE_PATH)
+    rows = []
+    conn = get_connection()
         cur = conn.cursor()
         saved = 0
         cleaned = []
