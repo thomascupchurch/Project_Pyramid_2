@@ -29,6 +29,11 @@ BACKUP_DIR = Path(os.getenv("SIGN_APP_BACKUP_DIR", str(BASE_DIR / "backups")))
 ONEDRIVE_SYNC_DIR = os.getenv("SIGN_APP_ONEDRIVE_SYNC_DIR")  # e.g. C:\\Users\\You\\OneDrive - Company\\SharedSignApp
 ONEDRIVE_AUTOSYNC_SEC = int(os.getenv("SIGN_APP_ONEDRIVE_AUTOSYNC_SEC", "0"))  # 0 disables periodic sync
 
+# Database backend selection: 'sqlite' (default) or 'mssql'
+DB_BACKEND = os.getenv('SIGN_APP_DB_BACKEND', 'sqlite').lower()
+# When DB_BACKEND == 'mssql', use this pyodbc style connection string
+MSSQL_CONN_STRING = os.getenv('SIGN_APP_MSSQL_CONN', '')  # Example: Driver={ODBC Driver 18 for SQL Server};Server=tcp:host,1433;Database=SignEstimation;Uid=user;Pwd=pass;Encrypt=yes;TrustServerCertificate=no;
+
 def ensure_backup_dir():
     if AUTO_BACKUP_INTERVAL_SEC > 0:
         BACKUP_DIR.mkdir(parents=True, exist_ok=True)

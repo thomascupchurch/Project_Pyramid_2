@@ -58,7 +58,7 @@ def _import_cyto_with_stub():
 
 cyto = _import_cyto_with_stub()
 import pandas as pd
-import sqlite3
+import sqlite3  # retained for legacy paths; progressive migration to db_util
 from datetime import datetime, timezone
 import base64
 import io
@@ -92,6 +92,7 @@ try:
     from utils.database import DatabaseManager  # type: ignore
     from utils.calculations import CostCalculator, compute_unit_price, compute_install_cost  # type: ignore
     from utils.onedrive import OneDriveManager  # type: ignore
+    from utils.db_util import get_connection  # unified backend connection helper
 except Exception as e:  # Fallback minimal stubs to keep module importable
     print(f"[startup][warn] Failed importing utils modules: {e}")
     class DatabaseManager:  # type: ignore
@@ -186,9 +187,19 @@ def health_route():  # type: ignore
             cyto_pkg_json = False
         version = '0.0.0'
         try:
-            vfile = Path(__file__).parent / 'VERSION.txt'
-            if vfile.exists():
-                version = vfile.read_text().strip()
+            candidates = []
+            # If running from a PyInstaller bundle, packaged files are under sys._MEIPASS
+            try:
+                base = Path(getattr(sys, '_MEIPASS'))  # type: ignore[attr-defined]
+                candidates.append(base / 'VERSION.txt')
+            except Exception:
+                pass
+            # Also try alongside source app.py
+            candidates.append(Path(__file__).parent / 'VERSION.txt')
+            for vf in candidates:
+                if vf.exists():
+                    version = vf.read_text(errors='ignore').strip()
+                    break
         except Exception:
             pass
         return jsonify({
@@ -335,7 +346,8 @@ def add_note_cb(n, etype, ent_id, text, include_values):
     try:
         # For sign_type we need name -> id lookup in notes table design uses entity_id; we will allow sign_types by name mapping here
         if etype == 'sign_type' and not str(ent_id).isdigit():
-            conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+            # backend-agnostic lookup via helper
+            conn = get_connection(); cur = conn.cursor()
             cur.execute('SELECT id FROM sign_types WHERE lower(name)=lower(?)',(str(ent_id),))
             row = cur.fetchone(); conn.close()
             if not row:
@@ -363,7 +375,7 @@ def load_notes_cb(n, etype, ent_id):
         return []
     try:
         if etype == 'sign_type' and not str(ent_id).isdigit():
-            conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+            conn = get_connection(); cur = conn.cursor()
             cur.execute('SELECT id FROM sign_types WHERE lower(name)=lower(?)',(str(ent_id),))
             row = cur.fetchone(); conn.close()
             if not row:
@@ -398,7 +410,7 @@ def toggle_note_include(n, note_id):
     if not note_id:
         return dbc.Alert('Note ID required', color='danger')
     try:
-        conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+        conn = get_connection(); cur = conn.cursor()
         cur.execute('SELECT include_in_export FROM notes WHERE id=?',(int(note_id),))
         row = cur.fetchone()
         if not row:

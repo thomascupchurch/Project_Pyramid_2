@@ -1,6 +1,26 @@
-"""
-Database utilities for the Sign Estimation Application.
-Handles database initialization, data import/export, and OneDrive optimization.
+"""Database utilities for the Sign Estimation Application.
+
+Now supports pluggable backends (initially SQLite + experimental MSSQL).
+
+Design notes:
+ - The original implementation was tightly coupled to SQLite (PRAGMAs, ON CONFLICT
+     clauses, AUTOINCREMENT, etc.). To enable migration toward SQL Server without
+     immediately refactoring every call site, we keep the full original class body
+     (renamed to ``SQLiteDatabaseManager``) and introduce a lightweight
+     ``MssqlDatabaseManager`` implementing only the core subset of behaviors used
+     by primary app features (project + sign structures, import, estimate, pricing
+     recalculation, image association, and audit logging).
+ - A runtime alias ``DatabaseManager`` is exported that resolves to the proper
+     concrete class based on environment variable SIGN_APP_DB_BACKEND (see config).
+ - Advanced/less‑critical feature methods raise ``NotImplementedError`` for the
+     MSSQL backend until incrementally ported. This allows staged adoption while
+     keeping SQLite as the default fully‑featured backend.
+
+IMPORTANT: The MSSQL path is intentionally conservative and avoids vendor‑
+specific advanced SQL. Schema creation sticks to NVARCHAR(MAX)/FLOAT/INT/BIT
+and DATETIME2. JSON columns are stored as NVARCHAR(MAX). Future enhancements
+may leverage native JSON (if migrating to Azure SQL edge cases) or computed
+columns.
 """
 
 import sqlite3
@@ -11,7 +31,15 @@ from datetime import datetime
 import shutil
 from pathlib import Path
 
-class DatabaseManager:
+try:  # optional dependency only when MSSQL backend selected
+    import pyodbc  # noqa: F401
+except Exception:  # pragma: no cover
+    pyodbc = None  # type: ignore
+
+from config import DB_BACKEND, MSSQL_CONN_STRING, DATABASE_PATH
+
+
+class SQLiteDatabaseManager:
     def __init__(self, db_path="sign_estimation.db"):
         self.db_path = db_path
         self.init_database()
@@ -715,3 +743,309 @@ class DatabaseManager:
             nr.pop('Unit_Price', None)  # remove per-sign price
             sanitized.append(nr)
         return sanitized
+
+
+# ---------------------------- MSSQL Implementation ---------------------------
+class MssqlDatabaseManager:
+    """Experimental SQL Server backend.
+
+    Only a subset of methods are implemented initially. Methods not yet ported
+    will raise NotImplementedError to surface gaps clearly during staged
+    migration. This backend expects a working ODBC driver (e.g. *ODBC Driver 18
+    for SQL Server*) and a valid pyodbc style connection string supplied via
+    SIGN_APP_MSSQL_CONN.
+    """
+
+    def __init__(self, conn_string: str | None = None):
+        if pyodbc is None:
+            raise RuntimeError("pyodbc not installed; install pyodbc and proper ODBC driver to use MSSQL backend")
+        self.conn_string = conn_string or MSSQL_CONN_STRING
+        if not self.conn_string:
+            raise RuntimeError("MSSQL backend selected but SIGN_APP_MSSQL_CONN not set")
+        self.init_database()
+
+    # ---- Connection helper ----
+    def _connect(self):
+        return pyodbc.connect(self.conn_string)
+
+    # ---- Schema initialization ----
+    def init_database(self):  # noqa: C901 (complexity acceptable for bootstrap)
+        conn = self._connect()
+        cur = conn.cursor()
+
+        def ensure_table(name: str, ddl: str):
+            cur.execute("SELECT 1 FROM sys.tables WHERE name=?", (name,))
+            if not cur.fetchone():
+                cur.execute(ddl)
+
+        # Core tables
+        ensure_table('projects', (
+            "CREATE TABLE projects ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "name NVARCHAR(255) NOT NULL UNIQUE,"
+            "description NVARCHAR(MAX),"
+            "created_date DATE DEFAULT CAST(GETDATE() AS DATE),"
+            "sales_tax_rate FLOAT DEFAULT 0,"
+            "installation_rate FLOAT DEFAULT 0,"
+            "include_installation BIT DEFAULT 1,"
+            "include_sales_tax BIT DEFAULT 1,"
+            "pricing_profile_id INT NULL,"
+            "last_modified DATETIME2 DEFAULT SYSUTCDATETIME()"  # profile FK added later if needed
+            ")"))
+
+        ensure_table('buildings', (
+            "CREATE TABLE buildings ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "project_id INT NOT NULL,"
+            "name NVARCHAR(255) NOT NULL,"
+            "description NVARCHAR(MAX),"
+            "last_modified DATETIME2 DEFAULT SYSUTCDATETIME(),"
+            "CONSTRAINT fk_building_project FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE"
+            ")"))
+        # Unique composite index
+        cur.execute("IF NOT EXISTS (SELECT 1 FROM sys.indexes WHERE name='idx_buildings_project_name') "
+                    "CREATE UNIQUE INDEX idx_buildings_project_name ON buildings(project_id, name)")
+
+        ensure_table('sign_types', (
+            "CREATE TABLE sign_types ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "name NVARCHAR(255) NOT NULL UNIQUE,"
+            "description NVARCHAR(MAX),"
+            "material_alt NVARCHAR(255),"
+            "unit_price FLOAT DEFAULT 0,"
+            "material NVARCHAR(255),"
+            "price_per_sq_ft FLOAT DEFAULT 0,"
+            "width FLOAT DEFAULT 0,"
+            "height FLOAT DEFAULT 0,"
+            "material_multiplier FLOAT DEFAULT 0,"
+            "install_type NVARCHAR(255),"
+            "install_time_hours FLOAT DEFAULT 0,"
+            "per_sign_install_rate FLOAT DEFAULT 0,"
+            "image_path NVARCHAR(1024),"
+            "last_modified DATETIME2 DEFAULT SYSUTCDATETIME()"
+            ")"))
+
+        ensure_table('sign_groups', (
+            "CREATE TABLE sign_groups ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "name NVARCHAR(255) NOT NULL UNIQUE,"
+            "description NVARCHAR(MAX),"
+            "last_modified DATETIME2 DEFAULT SYSUTCDATETIME()"
+            ")"))
+
+        ensure_table('sign_group_members', (
+            "CREATE TABLE sign_group_members ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "group_id INT NOT NULL,"
+            "sign_type_id INT NOT NULL,"
+            "quantity INT DEFAULT 1,"
+            "CONSTRAINT fk_sgm_group FOREIGN KEY(group_id) REFERENCES sign_groups(id) ON DELETE CASCADE,"
+            "CONSTRAINT fk_sgm_sign FOREIGN KEY(sign_type_id) REFERENCES sign_types(id) ON DELETE CASCADE"
+            ")"))
+
+        ensure_table('building_signs', (
+            "CREATE TABLE building_signs ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "building_id INT NOT NULL,"
+            "sign_type_id INT NOT NULL,"
+            "quantity INT DEFAULT 1,"
+            "custom_price FLOAT NULL,"
+            "CONSTRAINT fk_bs_building FOREIGN KEY(building_id) REFERENCES buildings(id) ON DELETE CASCADE,"
+            "CONSTRAINT fk_bs_sign FOREIGN KEY(sign_type_id) REFERENCES sign_types(id) ON DELETE CASCADE"
+            ")"))
+
+        ensure_table('building_sign_groups', (
+            "CREATE TABLE building_sign_groups ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "building_id INT NOT NULL,"
+            "group_id INT NOT NULL,"
+            "quantity INT DEFAULT 1,"
+            "CONSTRAINT fk_bsg_building FOREIGN KEY(building_id) REFERENCES buildings(id) ON DELETE CASCADE,"
+            "CONSTRAINT fk_bsg_group FOREIGN KEY(group_id) REFERENCES sign_groups(id) ON DELETE CASCADE"
+            ")"))
+
+        ensure_table('material_pricing', (
+            "CREATE TABLE material_pricing ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "material_name NVARCHAR(255) NOT NULL UNIQUE,"
+            "price_per_sq_ft FLOAT NOT NULL,"
+            "last_updated DATETIME2 DEFAULT SYSUTCDATETIME()"
+            ")"))
+
+        # Minimal audit + snapshots (JSON stored as text)
+        ensure_table('audit_log', (
+            "CREATE TABLE audit_log ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "action NVARCHAR(255) NOT NULL,"
+            "entity NVARCHAR(255) NOT NULL,"
+            "entity_id INT NULL,"
+            "meta NVARCHAR(MAX),"
+            "created_at DATETIME2 DEFAULT SYSUTCDATETIME()"
+            ")"))
+        ensure_table('estimate_snapshots', (
+            "CREATE TABLE estimate_snapshots ("
+            "id INT IDENTITY(1,1) PRIMARY KEY,"
+            "project_id INT NOT NULL,"
+            "label NVARCHAR(255),"
+            "snapshot_hash NVARCHAR(64),"
+            "data NVARCHAR(MAX) NOT NULL,"
+            "created_at DATETIME2 DEFAULT SYSUTCDATETIME(),"
+            "CONSTRAINT fk_snap_project FOREIGN KEY(project_id) REFERENCES projects(id) ON DELETE CASCADE"
+            ")"))
+
+        conn.commit(); conn.close()
+
+    # ---------------- Core feature methods (ported) ----------------
+    def import_csv_data(self, csv_file_path, table_mapping=None):
+        try:
+            df = pd.read_csv(csv_file_path)
+            conn = self._connect(); cur = conn.cursor()
+            if table_mapping is None:
+                table_mapping = {
+                    'name': 'name', 'description': 'description', 'price': 'unit_price',
+                    'material': 'material', 'width': 'width', 'height': 'height'
+                }
+            for _, row in df.iterrows():
+                name = str(row.get('name', row.iloc[0] if len(row) > 0 else ''))
+                description = str(row.get('description', row.iloc[1] if len(row) > 1 else ''))
+                width = row.get('width', row.get('Width', 0)) or 0
+                height = row.get('height', row.get('Height', 0)) or 0
+                unit_price = row.get('price', row.get('Price', row.get('unit_price', 0))) or 0
+                price_per_sq_ft = 0.0
+                try:
+                    if width and height and unit_price:
+                        area = float(width) * float(height)
+                        if area > 0:
+                            price_per_sq_ft = float(unit_price) / area
+                except Exception:
+                    price_per_sq_ft = 0.0
+                # Upsert logic (update then insert if missing)
+                cur.execute('UPDATE sign_types SET description=?, unit_price=?, material=?, price_per_sq_ft=?, width=?, height=?, last_modified=SYSUTCDATETIME() WHERE name=?',
+                            (description, float(unit_price), str(row.get('material', '')), price_per_sq_ft, float(width or 0), float(height or 0), name))
+                if cur.rowcount == 0:
+                    cur.execute('INSERT INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height) VALUES (?,?,?,?,?,?,?)',
+                                (name, description, float(unit_price), str(row.get('material', '')), price_per_sq_ft, float(width or 0), float(height or 0)))
+                self._log_audit('import_or_replace', 'sign_types', None, {'name': name, 'unit_price': float(unit_price)})
+            conn.commit(); conn.close()
+            return True, f"Successfully imported {len(df)} records"
+        except Exception as e:  # pragma: no cover - error path
+            return False, f"Error importing CSV: {e}"
+
+    def get_project_estimate(self, project_id):
+        conn = self._connect()
+        projects_df = pd.read_sql("SELECT * FROM projects WHERE id = ?", conn, params=[project_id])
+        if projects_df.empty:
+            conn.close(); return None
+        project = projects_df.iloc[0]
+        estimate_data = []
+        total_cost = 0.0
+        buildings = pd.read_sql("SELECT * FROM buildings WHERE project_id=?", conn, params=[project_id])
+        for _, building in buildings.iterrows():
+            building_cost = 0.0
+            signs = pd.read_sql('''SELECT st.name, st.unit_price, st.material, st.width, st.height, bs.quantity, bs.custom_price
+                                   FROM building_signs bs JOIN sign_types st ON bs.sign_type_id = st.id WHERE bs.building_id = ?''', conn, params=[building['id']])
+            for _, sign in signs.iterrows():
+                price = sign['custom_price'] if sign['custom_price'] else sign['unit_price']
+                line_total = price * sign['quantity']
+                building_cost += line_total
+                estimate_data.append({
+                    'Building': building['name'],
+                    'Item': sign['name'],
+                    'Material': sign['material'],
+                    'Dimensions': f"{sign['width']} x {sign['height']}" if sign['width'] and sign['height'] else '',
+                    'Quantity': sign['quantity'],
+                    'Unit_Price': price,
+                    'Total': line_total
+                })
+            total_cost += building_cost
+        if project.get('include_installation') and project.get('installation_rate'):
+            inst = total_cost * float(project['installation_rate'])
+            total_cost += inst
+            estimate_data.append({'Building': 'ALL', 'Item': 'Installation', 'Material': '', 'Dimensions': '', 'Quantity': 1, 'Unit_Price': inst, 'Total': inst})
+        if project.get('include_sales_tax') and project.get('sales_tax_rate'):
+            tax = total_cost * float(project['sales_tax_rate'])
+            total_cost += tax
+            estimate_data.append({'Building': 'ALL', 'Item': 'Sales Tax', 'Material': '', 'Dimensions': '', 'Quantity': 1, 'Unit_Price': tax, 'Total': tax})
+        conn.close(); return estimate_data
+
+    def recalc_prices_from_materials(self):
+        conn = self._connect(); cur = conn.cursor()
+        cur.execute('''SELECT st.id, st.width, st.height, mp.price_per_sq_ft
+                       FROM sign_types st JOIN material_pricing mp ON LOWER(st.material)=LOWER(mp.material_name)
+                       WHERE st.width > 0 AND st.height > 0''')
+        rows = cur.fetchall(); updated = 0
+        for sid, w, h, ppsf in rows:
+            try:
+                area = float(w) * float(h); unit_price = area * float(ppsf)
+            except Exception:
+                continue
+            cur.execute('UPDATE sign_types SET price_per_sq_ft=?, unit_price=?, last_modified=SYSUTCDATETIME() WHERE id=?', (float(ppsf), float(unit_price), sid))
+            updated += 1
+        if updated:
+            self._log_audit('recalc_prices', 'sign_types', None, {'rows_updated': updated})
+        conn.commit(); conn.close(); return updated
+
+    def set_sign_image(self, sign_name: str, image_rel_path: str):
+        try:
+            conn = self._connect(); cur = conn.cursor()
+            cur.execute('UPDATE sign_types SET image_path=?, last_modified=SYSUTCDATETIME() WHERE LOWER(name)=LOWER(?)', (image_rel_path, sign_name))
+            if cur.rowcount == 0:
+                conn.close(); return False, f"Sign type '{sign_name}' not found"
+            conn.commit(); conn.close()
+            self._log_audit('update_image', 'sign_types', None, {'name': sign_name, 'image_path': image_rel_path})
+            return True, 'Image path updated'
+        except Exception as e:  # pragma: no cover
+            return False, f'Error setting image: {e}'
+
+    # --- Minimal audit helper ---
+    def _log_audit(self, action: str, entity: str, entity_id: int | None, meta: dict | None = None):
+        try:
+            conn = self._connect(); cur = conn.cursor()
+            cur.execute('INSERT INTO audit_log(action, entity, entity_id, meta) VALUES (?,?,?,?)', (action, entity, entity_id, json.dumps(meta or {})))
+            conn.commit(); conn.close()
+        except Exception:  # pragma: no cover
+            pass
+
+    # --- Unported methods ---
+    def optimize_for_onedrive(self):  # pragma: no cover
+        return  # not applicable
+
+    # Remaining public API methods raise until ported
+    def export_to_excel(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('export_to_excel not yet implemented for MSSQL backend')
+    def create_pricing_profile(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('create_pricing_profile not yet implemented for MSSQL backend')
+    def assign_pricing_profile_to_project(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('assign_pricing_profile_to_project not yet implemented for MSSQL backend')
+    def ensure_tag(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('tagging not yet implemented for MSSQL backend')
+    def tag_sign_type(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('tagging not yet implemented for MSSQL backend')
+    def list_tags_for_sign_type(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('tagging not yet implemented for MSSQL backend')
+    def add_note(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('notes not yet implemented for MSSQL backend')
+    def list_notes(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('notes not yet implemented for MSSQL backend')
+    def create_bid_template(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('bid templates not yet implemented for MSSQL backend')
+    def add_item_to_template(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('bid templates not yet implemented for MSSQL backend')
+    def apply_template_to_building(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('bid templates not yet implemented for MSSQL backend')
+    def create_estimate_snapshot(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('snapshots not yet implemented for MSSQL backend')
+    def list_estimate_snapshots(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('snapshots not yet implemented for MSSQL backend')
+    def diff_snapshots(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('snapshots not yet implemented for MSSQL backend')
+    def build_client_facing_estimate(self, *a, **kw):  # pragma: no cover
+        raise NotImplementedError('client facing estimate not yet implemented for MSSQL backend')
+
+
+# Public alias matching selected backend
+if DB_BACKEND == 'mssql':  # pragma: no cover - selection logic
+    DatabaseManager = MssqlDatabaseManager  # type: ignore
+else:
+    DatabaseManager = SQLiteDatabaseManager  # type: ignore
+

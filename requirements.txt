@@ -1,4 +1,5 @@
 flask==3.1.2
+numpy==2.2.2
 pandas==2.3.2
 plotly==6.3.0
 dash==3.2.0
@@ -13,3 +14,7 @@ reportlab==4.2.5
 # Upgrade to supported Kaleido (>=1.0.0) to avoid deprecation warnings (Sep 2025 notice)
 kaleido>=1.0.0,<2.0.0
 platformdirs==4.3.6
+
+# Optional: enable SQL Server backend (set SIGN_APP_DB_BACKEND=mssql and install pyodbc + ODBC Driver)
+# pyodbc is kept optional to avoid forcing driver installation in pure SQLite deployments.
+pyodbc; platform_system == 'Windows'

@@ -27,9 +27,20 @@ for mod in [
     'cairosvg',
     'reportlab.pdfgen', 'reportlab.lib',
     'PIL',
-    'dash_cytoscape'
+    'dash_cytoscape',
+    # win32 shims to satisfy PyInstaller on Windows
+    'win32ctypes',
+    'win32ctypes.pywin32',
+    'win32ctypes.pywin32.pywintypes',
+    'pywintypes',
+    'win32api'
 ]:
     hidden.add(mod)
+
+# Include pyodbc when MSSQL backend requested at build time
+import os as _os
+if _os.getenv('SIGN_APP_DB_BACKEND','').lower() == 'mssql':
+    hidden.add('pyodbc')
 
 for pkg in ['plotly','dash_cytoscape']:
     try:
@@ -47,12 +58,15 @@ except Exception as _e_collect_all:
 
 assets_dir = project_root / 'assets'
 logo_file_root = project_root / 'LSI_Logo.svg'
+version_file = project_root / 'VERSION.txt'
 
 datas = []
 if assets_dir.exists():
     datas.append((str(assets_dir), 'assets'))
 if logo_file_root.exists():
     datas.append((str(logo_file_root), '.'))
+if version_file.exists():
+    datas.append((str(version_file), '.'))
 
 for _src, _tgt in _cy_d or []:
     datas.append((_src, _tgt))

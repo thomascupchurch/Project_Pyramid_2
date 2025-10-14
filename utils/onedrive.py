@@ -398,9 +398,10 @@ class OneDriveManager:
 
         app_dir = self.onedrive_path / 'app'
         bundle_dir = self.onedrive_path / 'bundle'
-        # Candidate executables
+        # Candidate executables (prefer one-file EXE if present under bundle/)
         bundle_exe = bundle_dir / 'sign_estimator' / 'sign_estimator.exe'
         bundle_console_exe = bundle_dir / 'sign_estimator_console' / 'sign_estimator_console.exe'
+        bundle_onefile_exe = bundle_dir / 'sign_estimator_onefile.exe'
 
         batch_lines = [
             '@echo off',
@@ -410,8 +411,9 @@ class OneDriveManager:
             'echo ============================================',
             f'set APP_DIR="{app_dir}"',
             f'set BUNDLE_DIR="{bundle_dir}"',
-            'set PREFERRED_EXE=',
-            f'if exist "{bundle_exe}" set PREFERRED_EXE="{bundle_exe}"',
+            f'set PREFERRED_EXE=',
+            f'if exist "{bundle_onefile_exe}" set PREFERRED_EXE="{bundle_onefile_exe}"',
+            f'if exist "{bundle_exe}" if not defined PREFERRED_EXE set PREFERRED_EXE="{bundle_exe}"',
             f'if exist "{bundle_console_exe}" if not defined PREFERRED_EXE set PREFERRED_EXE="{bundle_console_exe}"',
             'if defined PREFERRED_EXE (',
             '  echo Launching bundled executable %PREFERRED_EXE%',
@@ -478,17 +480,19 @@ class OneDriveManager:
             '#>',
             f'$AppDir = "{app_dir}"',
             f'$BundleDir = "{bundle_dir}"',
+            f'$OneFileExe = Join-Path $BundleDir "sign_estimator_onefile.exe"',
             f'$BundleExe = Join-Path $BundleDir "sign_estimator/sign_estimator.exe"',
             f'$BundleConsoleExe = Join-Path $BundleDir "sign_estimator_console/sign_estimator_console.exe"',
             '$Preferred = $null',
-            'if (Test-Path $BundleExe) { $Preferred = $BundleExe } elseif (Test-Path $BundleConsoleExe) { $Preferred = $BundleConsoleExe }',
+            'if (Test-Path $OneFileExe) { $Preferred = $OneFileExe } elseif (Test-Path $BundleExe) { $Preferred = $BundleExe } elseif (Test-Path $BundleConsoleExe) { $Preferred = $BundleConsoleExe }',
             'function Test-CytoResource { param([string]$Dir) if (-not (Test-Path $Dir)) { return $false }; return Test-Path (Join-Path $Dir "dash_cytoscape/package.json") }',
             'Write-Host "============================================" -ForegroundColor Cyan',
             'Write-Host " Sign Estimation Application Launcher" -ForegroundColor Green',
             'Write-Host "============================================" -ForegroundColor Cyan',
             'if ($Preferred) {',
-            '  $BundleDirResolved = Split-Path $Preferred -Parent',
-            '  if (Test-CytoResource -Dir $BundleDirResolved) {',
+            '  # For one-file EXE, cytoscape assets are internal; skip asset check. For folder bundle, verify assets.',
+            '  $isOneFile = (Split-Path $Preferred -Leaf) -eq "sign_estimator_onefile.exe"',
+            '  if ($isOneFile -or Test-CytoResource -Dir (Split-Path $Preferred -Parent)) {',
             '     Write-Host "Launching bundled executable: $Preferred" -ForegroundColor Green',
             '     Start-Process -FilePath $Preferred',
             '     exit 0',

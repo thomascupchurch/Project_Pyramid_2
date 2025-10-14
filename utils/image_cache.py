@@ -37,11 +37,31 @@ def get_or_build_thumbnail(src_path: str | Path, max_w: int, max_h: int) -> Opti
             return out_path
         # Build thumbnail
         if p.suffix.lower() == '.svg':
+            # Try CairoSVG first; if it fails (native Cairo missing), try sibling raster fallbacks
             try:
                 import cairosvg
                 cairosvg.svg2png(url=str(p), write_to=str(out_path), output_width=max_w)
                 return out_path if out_path.exists() else None
             except Exception:
+                # Fallback: look for a raster with same basename in same folder or assets/
+                base = p.stem
+                candidates = [
+                    p.with_suffix('.png'), p.with_suffix('.jpg'), p.with_suffix('.jpeg'),
+                    Path('assets') / f"{base}.png",
+                    Path('assets') / f"{base}.jpg",
+                    Path('assets') / f"{base}.jpeg",
+                ]
+                for rp in candidates:
+                    try:
+                        if rp.exists():
+                            from PIL import Image as PILImage  # type: ignore
+                            with PILImage.open(rp) as im:
+                                im = im.convert('RGBA')
+                                im.thumbnail((max_w, max_h))
+                                im.save(out_path, format='PNG')
+                            return out_path if out_path.exists() else None
+                    except Exception:
+                        continue
                 return None
         from PIL import Image as PILImage  # type: ignore
         with PILImage.open(p) as im:

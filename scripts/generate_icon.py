@@ -46,13 +46,18 @@ try:
         img = Image.open(TMP_PNG).convert('RGBA')
         TMP_PNG.unlink(missing_ok=True)
     else:
-        # Fallback: try to open SVG as image via Pillow plugins; if unsupported, inform user.
-        try:
-            img = Image.open(SVG).convert('RGBA')  # may fail on pure SVG
-        except Exception as pe:
-            print(f"[icon][error] CairoSVG not available and Pillow cannot open SVG: {pe}")
-            print("[icon][hint] Install CairoSVG (and Cairo runtime), or add assets/LSI_Logo.png and re-run.")
-            sys.exit(4)
+        # If SVG cannot be rasterized and PNG fallback exists, use it to avoid Cairo dependency for icon
+        PNG_FALLBACK = ROOT / 'assets' / 'LSI_Logo.png'
+        if PNG_FALLBACK.exists():
+            img = Image.open(PNG_FALLBACK).convert('RGBA')
+        else:
+            # Fallback: try to open SVG via Pillow (may fail)
+            try:
+                img = Image.open(SVG).convert('RGBA')
+            except Exception as pe:
+                print(f"[icon][error] CairoSVG not available and Pillow cannot open SVG: {pe}")
+                print("[icon][hint] Install CairoSVG (and Cairo runtime), or add assets/LSI_Logo.png and re-run.")
+                sys.exit(4)
     sizes = [(16,16),(32,32),(48,48),(64,64),(128,128),(256,256)]
     img.save(ICO, format='ICO', sizes=sizes)
     print(f"[icon] Generated icon at {ICO}")

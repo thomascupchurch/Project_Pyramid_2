@@ -37,6 +37,11 @@ for mod in [
     except Exception:
         pass
 
+# Add pyodbc when building with MSSQL backend
+import os as _os
+if _os.getenv('SIGN_APP_DB_BACKEND','').lower() == 'mssql':
+    hidden.add('pyodbc')
+
 # Collect deeper dynamic modules for plotly to avoid missing runtime components
 for pkg in ['plotly','dash_cytoscape']:
     try:
@@ -54,12 +59,15 @@ except Exception as _e_collect_all:
 
 assets_dir = project_root / 'assets'
 logo_file = project_root / 'LSI_Logo.svg'
+version_file = project_root / 'VERSION.txt'
 
 datas = []
 if assets_dir.exists():
     datas.append((str(assets_dir), 'assets'))
 if logo_file.exists():
     datas.append((str(logo_file), '.'))
+if version_file.exists():
+    datas.append((str(version_file), '.'))
 
 pkg_path = None  # no manual directory copy; rely on collect_all
 

@@ -250,6 +250,16 @@ def main():
                     return 2
                 else:
                     print("   (Continuing without abort; affected bundles may degrade or stub metadata at runtime.)")
+            # Also copy one-file EXE if present in dist (convenience for click-to-run)
+            try:
+                onefile_src = dist_dir / 'sign_estimator.exe'
+                if onefile_src.exists():
+                    onefile_dst = bundle_target_root / 'sign_estimator_onefile.exe'
+                    _shutil.copy2(onefile_src, onefile_dst)
+                    print(f"Copied one-file EXE -> {onefile_dst}")
+            except Exception as _onefile_err:
+                print(f"⚠️  Could not copy one-file EXE: {_onefile_err}")
+
             print("✅ Bundle build/copy complete")
             # Post-build export capability summary
             print("\n📦 Export Capability Summary:")

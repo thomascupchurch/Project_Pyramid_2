@@ -88,6 +88,8 @@ if %PY_OK%==0 (
 	goto :fail
 ) else (
 	echo [info] Running: "%PYEXE%" -m PyInstaller %SPEC%
+	set PYTHONNOUSERSITE=1
+	set "PYTHONPATH=%ROOT%;%PYTHONPATH%"
 	"%PYEXE%" -m PyInstaller %SPEC% --noconfirm || (echo Build failed & goto :fail)
 )
 echo Bundle created under dist (spec: %SPEC%)
@@ -95,11 +97,12 @@ echo Bundle created under dist (spec: %SPEC%)
 REM Optionally update shortcuts after a successful build
 :post_build
 if %UPDATE_SHORTCUTS%==1 (
-	set PS1=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe
+	set "PS1=%SystemRoot%\System32\WindowsPowerShell\v1.0\powershell.exe"
 	if exist "%PS1%" (
 		"%PS1%" -ExecutionPolicy Bypass -NoLogo -NoProfile -File "%ROOT%\scripts\post_build_update_shortcuts.ps1" || echo [warn] Shortcut update failed
 	) else (
-		echo [warn] powershell.exe not found; skipping shortcut update
+		rem Fallback to powershell in PATH if system32 path missing
+		where powershell >nul 2>nul && powershell -ExecutionPolicy Bypass -NoLogo -NoProfile -File "%ROOT%\scripts\post_build_update_shortcuts.ps1" || echo [warn] powershell.exe not found; skipping shortcut update
 	)
 )
 goto :done
@@ -107,9 +110,9 @@ goto :done
 :fail
 echo.
 echo Hints:
-echo  - If the failure mentions 'No module named PyInstaller', run:
-echo    "%ROOT%\scripts\rebuild_venv.bat"  (recommended) ^| or
-echo    "%PYEXE%" -m pip install pyinstaller
+echo  - If the failure mentions 'No module named PyInstaller' or uninstall-no-record-file, run:
+echo    "%PYEXE%" -m pip install --force-reinstall --no-deps pyinstaller==6.11.0
+echo    or run the helper: powershell -ExecutionPolicy Bypass -File scripts\repair_and_build.ps1
 echo  - If Python points to a broken Windows Store shim, recreate the venv:
 echo    PowerShell: scripts\rebuild_venv.ps1 -Rebuild -Force
 popd >nul 2>nul

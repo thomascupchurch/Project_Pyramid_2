@@ -56,9 +56,53 @@ Write-Host "[repair] Rebuilding .venv with specified Python..." -ForegroundColor
 & $py scripts/rebuild_venv.py --yes --force --python $py
 if ($LASTEXITCODE -ne 0) { Write-Host "[error] venv rebuild failed (rc=$LASTEXITCODE)" -ForegroundColor Red; exit $LASTEXITCODE }
 
-Write-Host "[repair] Installing/upgrading pip and PyInstaller in .venv..." -ForegroundColor DarkCyan
-& .\.venv\Scripts\python.exe -m pip install -U pip pyinstaller
-if ($LASTEXITCODE -ne 0) { Write-Host "[error] pip/pyinstaller install failed (rc=$LASTEXITCODE)" -ForegroundColor Red; exit $LASTEXITCODE }
+Write-Host "[repair] Upgrading pip in .venv..." -ForegroundColor DarkCyan
+& .\.venv\Scripts\python.exe -m pip install -U pip
+if ($LASTEXITCODE -ne 0) { Write-Host "[warn] pip upgrade failed (rc=$LASTEXITCODE); continuing" -ForegroundColor Yellow }
+
+Write-Host "[repair] Installing PyInstaller (pinned) in .venv..." -ForegroundColor DarkCyan
+& .\.venv\Scripts\python.exe -m pip install --force-reinstall --no-deps pyinstaller==6.11.0
+if ($LASTEXITCODE -ne 0) {
+  Write-Host "[warn] PyInstaller install failed; attempting cleanup of stale files..." -ForegroundColor Yellow
+  try {
+    $sp = Join-Path $PSScriptRoot "..\..\.venv\Lib\site-packages"
+    if (-not (Test-Path $sp)) { $sp = ".\.venv\Lib\site-packages" }
+    $scriptsDir = ".\.venv\Scripts"
+    # Remove PyInstaller package folders
+    Get-ChildItem -Path $sp -Filter "PyInstaller*" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    # Remove dist-info/egg-info remnants
+    Get-ChildItem -Path $sp -Filter "pyinstaller*.*-info" -ErrorAction SilentlyContinue | Remove-Item -Recurse -Force -ErrorAction SilentlyContinue
+    # Remove console entry points
+    foreach ($name in @('pyinstaller.exe','pyi-archive_viewer.exe','pyi-bindepend.exe','pyi-grab_version.exe','pyi-makespec.exe','pyi-set_version.exe')) {
+      $p = Join-Path $scriptsDir $name; if (Test-Path $p) { Remove-Item $p -Force -ErrorAction SilentlyContinue }
+    }
+  } catch {
+    Write-Warning "Cleanup encountered an issue: $($_.Exception.Message)"
+  }
+  Write-Host "[repair] Retrying PyInstaller install with --ignore-installed..." -ForegroundColor DarkCyan
+  & .\.venv\Scripts\python.exe -m pip install --ignore-installed --no-deps pyinstaller==6.11.0
+  if ($LASTEXITCODE -ne 0) { Write-Host "[error] pyinstaller install failed after cleanup (rc=$LASTEXITCODE)" -ForegroundColor Red; exit $LASTEXITCODE }
+}
+
+Write-Host "[repair] Ensuring pywin32-ctypes is installed (force clean)..." -ForegroundColor DarkCyan
+# Force a clean install because this package is prone to uninstall-no-record-file issues under OneDrive
+& .\.venv\Scripts\python.exe -m pip install --ignore-installed --no-deps --force-reinstall pywin32-ctypes==0.2.3
+if ($LASTEXITCODE -ne 0) { Write-Host "[error] pywin32-ctypes force install failed (rc=$LASTEXITCODE)" -ForegroundColor Red; exit $LASTEXITCODE }
+
+# Validate minimal import (only win32ctypes.pywin32.pywintypes) before proceeding
+& .\.venv\Scripts\python.exe -c "import importlib; importlib.import_module('win32ctypes.pywin32.pywintypes')" 2>$null
+if ($LASTEXITCODE -ne 0) { Write-Host "[error] win32ctypes.pywin32.pywintypes import failed after install; aborting build." -ForegroundColor Red; exit 1 }
+
+Write-Host "[repair] Ensuring pywin32 is installed..." -ForegroundColor DarkCyan
+& .\.venv\Scripts\python.exe -m pip install -U pywin32
+if ($LASTEXITCODE -ne 0) { Write-Host "[warn] pywin32 install reported an error; continuing" -ForegroundColor Yellow }
+
+# Full validation now that pywin32 is present
+& .\.venv\Scripts\python.exe .\scripts\check_win32_imports.py | Out-Host
+
+Write-Host "[repair] Ensuring pefile is installed (required by PyInstaller on Windows)..." -ForegroundColor DarkCyan
+& .\.venv\Scripts\python.exe -m pip install -U pefile==2023.2.7
+if ($LASTEXITCODE -ne 0) { Write-Host "[error] pefile install failed (rc=$LASTEXITCODE)" -ForegroundColor Red; exit $LASTEXITCODE }
 
 Write-Host "[repair] Building one-file bundle..." -ForegroundColor DarkCyan
 cmd /c scripts\build_bundle.bat --onefile

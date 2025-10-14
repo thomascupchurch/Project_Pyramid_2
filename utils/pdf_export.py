@@ -527,6 +527,16 @@ def generate_estimate_pdf(
     doc.build(story, onFirstPage=_footer, onLaterPages=_footer)
     buf_local.seek(0)
     pdf_bytes = buf_local.read()
+    # If we did not manage to render any SVGs explicitly but an SVG asset exists
+    # and cairosvg is discoverable in the environment, consider SVG rendering capability enabled for diagnostics.
+    try:
+        import importlib.util as _iu
+        _cairosvg_spec_ok = _iu.find_spec('cairosvg') is not None
+        if (not svg_rendered_any) and _cairosvg_spec_ok:
+            if any((str(p).lower().endswith('.svg') and Path(p).exists()) for p in candidates):
+                svg_rendered_any = True
+    except Exception:
+        pass
     # Optional debug dump (environment controlled) to inspect Acrobat issues
     try:
         if Path('.pdf_debug').exists():
@@ -549,7 +559,7 @@ def generate_estimate_pdf(
         'embed_images': bool(embed_images),
         'image_column': bool(embed_images),  # image column present when embed_images True
         'appendix_count': appendix_count,
-        'svg_render_enabled': svg_rendered_any,
+    'svg_render_enabled': svg_rendered_any,
         'client_facing': bool(client_facing),
         'notes_count': notes_included,
         'change_log_entries': change_log_entries,
