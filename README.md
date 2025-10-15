@@ -40,7 +40,7 @@ A modern Python web application for sign manufacturing cost estimation and proje
 
 ### OneDrive Integration
 
-- **Shared Database**: SQLite database optimized for OneDrive sharing
+- **Shared Database**: SQLite database optimized for OneDrive sharing (default) or SQL Server (MSSQL) via pyodbc
 - **Automatic Deployment**: Scripts to deploy app to shared OneDrive folders
 - **Team Collaboration**: Multiple users can access the same data
 - **Conflict Resolution**: Database synchronization tools
@@ -195,6 +195,8 @@ Planned (optional) future expansions: multiple images per sign, export embedding
 | Variable              | Purpose                                 | Default            |
 | --------------------- | --------------------------------------- | ------------------ |
 | SIGN_APP_DB           | Path to DB file                         | sign_estimation.db |
+| SIGN_APP_DB_BACKEND   | Database backend: sqlite or mssql       | sqlite             |
+| SIGN_APP_MSSQL_CONN   | ODBC connection string for MSSQL        | (unset)            |
 | SIGN_APP_PORT         | HTTP port                               | 8050               |
 | SIGN_APP_HOST         | Bind address (0.0.0.0 for LAN)          | 127.0.0.1          |
 | SIGN_APP_EXPECT_LAN   | Expect LAN access (warn if only localhost) | 0                  |
@@ -206,6 +208,26 @@ Planned (optional) future expansions: multiple images per sign, export embedding
 | DISABLE_SVG_RENDER    | Skip SVG rasterization (fallback header) | 0                  |
 
 For local use via OneDrive, you can ignore network and firewall settings entirely. Advanced options for LAN access are supported but not required for personal/local operation.
+
+### SQL Server (MSSQL) Backend
+
+You can run the app against a centralized SQL Server. Set these before launching:
+
+- SIGN_APP_DB_BACKEND=mssql
+- SIGN_APP_MSSQL_CONN="Driver={ODBC Driver 17 for SQL Server};Server=YOUR-SERVER;Database=SignEstimator;Trusted_Connection=yes;"
+
+Notes:
+- Install an appropriate Microsoft ODBC Driver (17 or 18) for SQL Server on Windows.
+- pyodbc must be available (already listed in requirements; optional unless you enable MSSQL).
+- The code paths use a small helper `utils.db_util.get_connection()` to remain backend‑agnostic.
+
+Migrating existing data from SQLite to MSSQL:
+1. Provision an empty database on your SQL Server (e.g., SignEstimator)
+2. Set env vars as above and run the migration tool:
+   - Windows PowerShell: `$env:SIGN_APP_DB_BACKEND='mssql'; $env:SIGN_APP_MSSQL_CONN='<your odbc conn>'; python scripts/migrate_sqlite_to_mssql.py`
+3. Start the app; it will read/write from SQL Server.
+
+If you do not set SIGN_APP_DB_BACKEND, the app will continue to use the local SQLite file path from SIGN_APP_DB.
 
 ### SVG Rendering (Cairo) on Windows & macOS
 

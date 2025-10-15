@@ -1,12 +1,13 @@
 """Shared estimation logic to reduce duplication in Dash callbacks.
 
-Functions here avoid Dash imports and focus purely on data/SQLite operations.
+Functions here avoid Dash imports and focus purely on data/DB operations.
 """
 from typing import List, Dict, Any, Optional, Tuple, Sequence
-import sqlite3
 from pathlib import Path
+import sqlite3
 import pandas as pd
 from .calculations import compute_unit_price, compute_install_cost
+from .db_util import get_connection
 
 DatabasePath = str | Path
 
@@ -38,7 +39,15 @@ def compute_custom_estimate(
             return float(v or 0)
         except Exception:
             return 0.0
-    conn = sqlite3.connect(db_path)
+    # Prefer explicit db_path when it's a real file (unit tests use temp SQLite files)
+    try:
+        if isinstance(db_path, (str, Path)) and str(db_path) and Path(db_path).exists():
+            conn = sqlite3.connect(str(db_path))
+        else:
+            conn = get_connection()
+    except Exception:
+        # Fallback to env-configured connection
+        conn = get_connection()
     proj_df = pd.read_sql_query('SELECT * FROM projects WHERE id=?', conn, params=(project_id,))
     if proj_df.empty:
         conn.close()

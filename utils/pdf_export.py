@@ -14,14 +14,15 @@ import hashlib
 from datetime import datetime
 from pathlib import Path
 from typing import List, Dict, Any, Tuple, Iterable
-import sqlite3
+from utils.db_util import get_connection
 import pandas as pd
 
 
 def _collect_image_map(database_path: str) -> dict:
     image_map = {}
     try:
-        conn = sqlite3.connect(database_path)
+        # database_path kept for API compatibility, but backend connection is env-driven
+        conn = get_connection()
         idf = pd.read_sql_query('SELECT name, image_path FROM sign_types WHERE image_path IS NOT NULL AND image_path<>""', conn)
         conn.close()
         for _, ir in idf.iterrows():
@@ -36,7 +37,7 @@ def _collect_image_map(database_path: str) -> dict:
 def _install_type_map(database_path: str) -> dict:
     install_map = {}
     try:
-        conn = sqlite3.connect(database_path)
+        conn = get_connection()
         it_df = pd.read_sql_query('SELECT name, install_type FROM sign_types', conn)
         conn.close()
         install_map = {name.lower(): (it or '') for name, it in it_df.values}

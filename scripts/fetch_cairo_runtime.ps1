@@ -17,7 +17,7 @@ $destPath = Join-Path $ScriptDir $Destination
 
 function Ensure-Dir($p) { if (-not (Test-Path $p)) { New-Item -ItemType Directory -Path $p | Out-Null } }
 
-if (Test-Path $destPath -and -not $Force) {
+if ((Test-Path $destPath) -and -not $Force) {
   Write-Host "[cairo] Destination $destPath already exists. Use -Force to overwrite." -ForegroundColor Yellow
   exit 0
 }

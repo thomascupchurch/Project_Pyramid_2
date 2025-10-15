@@ -163,6 +163,37 @@ $env:SIGN_APP_DB='sign_estimation.db'
 ./start_app.ps1
 ```
 
+### Using SQL Server (MSSQL) in Deployments
+
+To centralize the database on SQL Server instead of a shared SQLite file:
+
+1. Install Microsoft ODBC Driver for SQL Server (17 or 18) on each client machine.
+2. Ensure the Python environment has `pyodbc` available (bundles include it if configured).
+3. Set these environment variables before launching on clients:
+
+Batch (CMD):
+```bat
+set SIGN_APP_DB_BACKEND=mssql
+set SIGN_APP_MSSQL_CONN=Driver={ODBC Driver 17 for SQL Server};Server=YOUR-SERVER;Database=SignEstimator;Trusted_Connection=yes;
+start_app.bat
+```
+
+PowerShell:
+```powershell
+$env:SIGN_APP_DB_BACKEND='mssql'
+$env:SIGN_APP_MSSQL_CONN='Driver={ODBC Driver 17 for SQL Server};Server=YOUR-SERVER;Database=SignEstimator;Trusted_Connection=yes;'
+./start_app.ps1
+```
+
+Migration from existing SQLite:
+```powershell
+$env:SIGN_APP_DB_BACKEND='mssql'
+$env:SIGN_APP_MSSQL_CONN='Driver={ODBC Driver 17 for SQL Server};Server=YOUR-SERVER;Database=SignEstimator;Trusted_Connection=yes;'
+python scripts/migrate_sqlite_to_mssql.py
+```
+
+After migration, keep SIGN_APP_DB_BACKEND=mssql set to continue operating against SQL Server.
+
 For bundle builds you can still set these variables; they are read by the embedded Python runtime.
 
 ---

@@ -92,7 +92,7 @@ try:
     from utils.database import DatabaseManager  # type: ignore
     from utils.calculations import CostCalculator, compute_unit_price, compute_install_cost  # type: ignore
     from utils.onedrive import OneDriveManager  # type: ignore
-    from utils.db_util import get_connection  # unified backend connection helper
+    from utils.db_util import get_connection, backend  # unified backend connection helper and current backend
 except Exception as e:  # Fallback minimal stubs to keep module importable
     print(f"[startup][warn] Failed importing utils modules: {e}")
     class DatabaseManager:  # type: ignore
@@ -439,7 +439,7 @@ from dash.dependencies import ALL
 )
 def refresh_dropdown_options(_pattern_clicks, _interval, template_order_mode):
     try:
-        conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+        conn = get_connection(); cur = conn.cursor()
         cur.execute('SELECT id, name FROM projects ORDER BY name')
         projects = [{'label':r[1], 'value': r[0]} for r in cur.fetchall()]
         cur.execute('SELECT id, name FROM pricing_profiles ORDER BY name')
@@ -496,7 +496,7 @@ def handle_pricing_profiles(pp_clicks, name, tax, install, margin, default_value
         except Exception as e:
             msg = dbc.Alert(f'Error: {e}', color='danger')
     # Load all profiles
-    conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+    conn = get_connection(); cur = conn.cursor()
     cur.execute('SELECT id, name, sales_tax_rate, installation_rate, margin_multiplier, is_default FROM pricing_profiles ORDER BY id DESC')
     rows = [
         {
@@ -542,7 +542,7 @@ def make_default_profile(n, profile_id):
         return dbc.Alert('Profile ID required', color='danger'), dash.no_update
     try:
         # Set chosen default by marking is_default=1 and all others 0
-        conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+        conn = get_connection(); cur = conn.cursor()
         cur.execute('UPDATE pricing_profiles SET is_default=0')
         cur.execute('UPDATE pricing_profiles SET is_default=1 WHERE id=?',(int(profile_id),))
         conn.commit()
@@ -1765,7 +1765,7 @@ def handle_sign_type_multi_image(contents_list, filenames, sign_name):
     errors = []
     from hashlib import sha1
     img_dir = Path('sign_images'); img_dir.mkdir(exist_ok=True)
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     # fetch sign_type id
     cur.execute('SELECT id, image_path FROM sign_types WHERE name=?', (sign_name,))
@@ -1836,7 +1836,7 @@ def set_cover_image(n_clicks_list, sign_name):
         raise PreventUpdate
     if not path:
         raise PreventUpdate
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     cur.execute('SELECT id FROM sign_types WHERE name=?', (sign_name,))
     row = cur.fetchone()
@@ -1849,7 +1849,7 @@ def set_cover_image(n_clicks_list, sign_name):
 
 
 def _render_sign_image_gallery(sign_name: str):
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     cur.execute('SELECT id, image_path, display_order FROM sign_type_images sti JOIN sign_types st ON sti.sign_type_id=st.id WHERE st.name=? ORDER BY display_order', (sign_name,))
     rows = cur.fetchall()
@@ -1913,7 +1913,7 @@ def delete_sign_type_image(n_clicks_list, sign_name):
     if not path:
         raise PreventUpdate
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         cur = conn.cursor()
         # Get sign type id & current cover
         cur.execute('SELECT id, image_path FROM sign_types WHERE name=?', (sign_name,))
@@ -1958,7 +1958,7 @@ def update_output(contents, filename):
             # Assume CSV file
             df = pd.read_csv(io.StringIO(decoded.decode('utf-8')))
             # Minimal inline loader (previous helper removed during refactor)
-            conn = sqlite3.connect(DATABASE_PATH)
+            conn = get_connection()
             cur = conn.cursor()
             inserted = 0
             for r in df.to_dict('records'):
@@ -1980,7 +1980,7 @@ def update_output(contents, filename):
                     print(f"[import][warn] row skipped: {ie}")
             conn.commit(); conn.close()
             # Reload table data after import
-            conn = sqlite3.connect(DATABASE_PATH)
+            conn = get_connection()
             table_df = pd.read_sql_query("SELECT name, description, unit_price, material, price_per_sq_ft, width, height FROM sign_types ORDER BY name", conn)
             conn.close()
             return dbc.Alert(f"Imported/updated {inserted} sign types from {filename}", color="success"), table_df.to_dict('records')
@@ -2028,7 +2028,7 @@ def _force_import_book2(csv_path: Path):
         except:
             pass
         records.append((name[:120], str(r.get('Desc') or r.get('full_name') or '')[:255], unit_price, str(material)[:120], ppsf, float(width or 0), float(height or 0)))
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     cur.executemany('''
         INSERT INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height)
@@ -2055,7 +2055,7 @@ def manual_import_book2(n):
     csv_path = Path('Book2.csv')
     try:
         imported, total = _force_import_book2(csv_path)
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         df = pd.read_sql_query(
             "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name",
             conn
@@ -2096,7 +2096,7 @@ def create_or_refresh_projects(n_clicks, active_tab, name, desc, sales_tax, inst
     if not (hydrate_only or create_mode):
         raise PreventUpdate
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         cur = conn.cursor()
         feedback = dash.no_update
         if create_mode:
@@ -2146,7 +2146,7 @@ def create_or_refresh_projects(n_clicks, active_tab, name, desc, sales_tax, inst
 def load_project_for_edit(project_id):
     if not project_id:
         raise PreventUpdate
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     df = pd.read_sql_query('SELECT * FROM projects WHERE id=?', conn, params=(project_id,))
     conn.close()
     if df.empty:
@@ -2172,7 +2172,7 @@ def update_project(n_clicks, project_id, name, desc, sales_tax, install_rate, in
         raise PreventUpdate
     if not project_id or not name:
         return dbc.Alert('Select project and ensure name present', color='danger'), dash.no_update
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     cur.execute('''UPDATE projects SET name=?, description=?, sales_tax_rate=?, installation_rate=?, include_installation=?, include_sales_tax=?, last_modified=CURRENT_TIMESTAMP WHERE id=?''', (
         name.strip(), desc or '', float(sales_tax or 0)/100.0, float(install_rate or 0)/100.0,
@@ -2196,7 +2196,7 @@ def update_project(n_clicks, project_id, name, desc, sales_tax, install_rate, in
 def load_buildings_for_project(project_id):
     if not project_id:
         return [], None, []
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     buildings = pd.read_sql_query("SELECT id, name FROM buildings WHERE project_id = ? ORDER BY id", conn, params=(project_id,))
     sign_types = pd.read_sql_query("SELECT id, name, unit_price FROM sign_types ORDER BY name", conn)
     conn.close()
@@ -2219,7 +2219,7 @@ def add_building(n_clicks, project_id, name, desc):
         raise PreventUpdate
     if not project_id or not name:
         return dash.no_update, "Select project and enter name", dash.no_update
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     # Duplicate name check (case-insensitive) within project
     cur.execute("SELECT 1 FROM buildings WHERE project_id=? AND LOWER(name)=LOWER(?)", (project_id, name.strip()))
@@ -2249,7 +2249,7 @@ def rename_building(n_clicks, project_id, building_id, new_name):
         raise PreventUpdate
     if not (project_id and building_id and new_name and new_name.strip()):
         return dash.no_update, 'Provide building and new name', dash.no_update
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     # uniqueness within project
     cur.execute('SELECT 1 FROM buildings WHERE project_id=? AND LOWER(name)=LOWER(?) AND id<>?', (project_id, new_name.strip(), building_id))
@@ -2264,7 +2264,7 @@ def rename_building(n_clicks, project_id, building_id, new_name):
     return options, 'Building renamed', safe_tree_figure()
 
 def _fetch_building_signs(building_id):
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     df = pd.read_sql_query('''
         SELECT st.name as sign_name, bs.quantity, st.unit_price, (bs.quantity * st.unit_price) as total
         FROM building_signs bs
@@ -2277,7 +2277,7 @@ def _fetch_building_signs(building_id):
 
 def _fetch_building_name(building_id):
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         df = pd.read_sql_query('SELECT name FROM buildings WHERE id=?', conn, params=(building_id,))
         conn.close()
         if df.empty:
@@ -2303,7 +2303,7 @@ def manage_building_signs(building_id, add_clicks, save_clicks, sign_type_id, qt
     if not building_id:
         return [], dash.no_update, dash.no_update
     action_msg = dash.no_update
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     if 'add-sign-to-building-btn' in triggered and sign_type_id:
         qty = max(1, int(qty or 1))
@@ -2343,13 +2343,13 @@ def manage_building_signs(building_id, add_clicks, save_clicks, sign_type_id, qt
     Input('assign-project-dropdown','value')
 )
 def load_group_options_for_project(_project_id):
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     gdf = pd.read_sql_query('SELECT id, name FROM sign_groups ORDER BY name', conn)
     conn.close()
     return ([{'label': r.name, 'value': r.id} for r in gdf.itertuples()]) if not gdf.empty else []
 
 def _fetch_building_groups(building_id):
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     df = pd.read_sql_query('''SELECT sg.name as group_name, bsg.quantity, sg.id as group_id
                                FROM building_sign_groups bsg
                                JOIN sign_groups sg ON bsg.group_id = sg.id
@@ -2361,7 +2361,7 @@ def _fetch_assigned_group_options(building_id):
     """Return dropdown options for groups already assigned to a building."""
     if not building_id:
         return []
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     df = pd.read_sql_query('''SELECT sg.id, sg.name FROM sign_groups sg
                                JOIN building_sign_groups bsg ON bsg.group_id=sg.id
                                WHERE bsg.building_id=? ORDER BY sg.name''', conn, params=(building_id,))
@@ -2384,7 +2384,7 @@ def manage_building_groups_inline(building_id, add_clicks, save_clicks, group_id
     triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
     if not building_id:
         return [], dash.no_update, dash.no_update
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     msg = dash.no_update
     if 'add-group-to-building-btn' in triggered and group_id:
@@ -2432,13 +2432,13 @@ def refresh_project_group_dropdowns(project_id, building_id, show_all_values, _g
         # Group options
         show_all = bool(show_all_values and 'all' in show_all_values)
         if show_all:
-            conn = sqlite3.connect(DATABASE_PATH)
+            conn = get_connection()
             gdf = pd.read_sql_query('SELECT id, name FROM sign_groups ORDER BY name', conn)
             conn.close()
             group_opts = [{'label': r['name'], 'value': r['id']} for _, r in gdf.iterrows()]
         else:
             if project_id:
-                conn = sqlite3.connect(DATABASE_PATH)
+                conn = get_connection()
                 gdf = pd.read_sql_query('''SELECT DISTINCT sg.id, sg.name FROM sign_groups sg
                                             JOIN building_sign_groups bsg ON bsg.group_id=sg.id
                                             JOIN buildings b ON bsg.building_id=b.id
@@ -2469,7 +2469,7 @@ def remove_group_from_building(n_clicks, building_id, group_id):
     if not building_id or not group_id:
         return dash.no_update, 'Select building and group to remove', dash.no_update, dash.no_update
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         cur = conn.cursor()
         cur.execute('DELETE FROM building_sign_groups WHERE building_id=? AND group_id=?', (building_id, group_id))
         conn.commit()
@@ -2680,7 +2680,7 @@ def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mod
         return [], dbc.Alert("Select a project or building(s)", color='warning'), True
     # If only buildings chosen, derive project (assume same project; take first)
     if building_ids and not project_id:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         placeholders = ','.join(['?']*len(building_ids))
         pdf = pd.read_sql_query(f'SELECT DISTINCT project_id FROM buildings WHERE id IN ({placeholders})', conn, params=tuple(building_ids))
         conn.close()
@@ -2717,7 +2717,7 @@ def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mod
         return [], dbc.Alert("No data", color='warning'), True
     # If we used default path and building_ids provided, filter manually
     if use_default and building_ids:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         placeholders = ','.join(['?']*len(building_ids))
         ndf = pd.read_sql_query(f'SELECT id, name FROM buildings WHERE id IN ({placeholders})', conn, params=tuple(building_ids))
         conn.close()
@@ -2737,7 +2737,7 @@ def generate_estimate(n_clicks, project_id, building_id, price_mode, install_mod
     non_exterior_filtered = False
     if ext_only or non_ext_only:
         try:
-            conn = sqlite3.connect(DATABASE_PATH)
+            conn = get_connection()
             it_map_df = pd.read_sql_query('SELECT name, install_type FROM sign_types', conn)
             conn.close()
             it_map = {r['name'].lower(): (r['install_type'] or '') for _, r in it_map_df.iterrows()}
@@ -2814,7 +2814,7 @@ def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode,
         return dash.no_update
     # Derive project id from building if needed
     if building_ids and not project_id:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         placeholders = ','.join(['?']*len(building_ids))
         pdf = pd.read_sql_query(f'SELECT DISTINCT project_id FROM buildings WHERE id IN ({placeholders})', conn, params=tuple(building_ids))
         conn.close()
@@ -2831,7 +2831,7 @@ def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode,
             estimate_data = db_manager.get_project_estimate(project_id) or []
         else:
             estimate_data = []
-            conn = sqlite3.connect(DATABASE_PATH)
+            conn = get_connection()
             proj_df = pd.read_sql_query('SELECT * FROM projects WHERE id=?', conn, params=(project_id,))
             if proj_df.empty:
                 conn.close(); return dash.no_update
@@ -2896,7 +2896,7 @@ def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode,
             return dash.no_update
         # Filter to building if requested
         if building_ids:
-            conn = sqlite3.connect(DATABASE_PATH)
+            conn = get_connection()
             placeholders = ','.join(['?']*len(building_ids))
             ndf = pd.read_sql_query(f'SELECT name FROM buildings WHERE id IN ({placeholders})', conn, params=tuple(building_ids))
             conn.close()
@@ -2920,7 +2920,7 @@ def export_estimate(n_clicks, project_id, building_id, price_mode, install_mode,
             # Preload image paths map (sign name -> path)
             image_map = {}
             try:
-                conn = sqlite3.connect(DATABASE_PATH)
+                conn = get_connection()
                 idf = pd.read_sql_query('SELECT name, image_path FROM sign_types WHERE image_path IS NOT NULL AND image_path<>""', conn)
                 conn.close()
                 for _, ir in idf.iterrows():
@@ -3284,7 +3284,7 @@ def switch_tree_view(mode, spacing_factor, padding):
     if mode == 'cyto':
         nodes = get_project_tree_data()
         # Preload sign types metadata
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         try:
             st_df = pd.read_sql_query('SELECT name, unit_price, width, height, price_per_sq_ft, material_multiplier, material, description, image_path FROM sign_types', conn)
         except Exception:
@@ -3459,7 +3459,7 @@ def delete_project(confirm_clicks, project_id):
                 dash.no_update,
                 dash.no_update)
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         cur = conn.cursor()
         print(f"[delete_project] Deleting project id={project_id}")
         cur.execute('DELETE FROM building_sign_groups WHERE building_id IN (SELECT id FROM buildings WHERE project_id=?)', (project_id,))
@@ -3546,82 +3546,112 @@ def update_install_inputs(mode):
 )
 def manage_sign_types(active_tab, data_ts, add_clicks, data_rows):
     triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
+
+    # 1) Initial load: populate table when Signs tab becomes active
     if 'main-tabs' in triggered and active_tab == 'signs-tab':
-        conn = sqlite3.connect(DATABASE_PATH)
-        df = pd.read_sql_query(
-            "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name",
-            conn
-        )
-        conn.close()
-    records = df.to_dict('records')
-    return records, '', records
-    if 'add-sign-btn' in triggered:
-    rows = []
-    rows.append({"name":"","description":"","unit_price":0,"material":"","price_per_sq_ft":0,"width":0,"height":0})
-    return rows, 'New row added', rows
+        try:
+            conn = get_connection()
+            df = pd.read_sql_query(
+                "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name",
+                conn
+            )
+            conn.close()
+        except Exception:
+            df = pd.DataFrame(columns=['name','description','material_alt','unit_price','material','price_per_sq_ft','material_multiplier','width','height','install_type','install_time_hours','per_sign_install_rate','image_path'])
+        records = df.to_dict('records')
+        return records, '', records
+
+    # 2) Add new blank row
+    if 'add-sign-btn' in triggered and active_tab == 'signs-tab':
+        rows = list(data_rows or [])
+        rows.append({
+            'name':'','description':'','material_alt':'','unit_price':0,'material':'','price_per_sq_ft':0,
+            'material_multiplier':0,'width':0,'height':0,'install_type':'','install_time_hours':0,'per_sign_install_rate':0,'image_path':None
+        })
+        return rows, 'New row added', rows
+
+    # 3) Persist edits
     if 'signs-table' in triggered and active_tab == 'signs-tab':
-    rows = []
-    conn = get_connection()
-        cur = conn.cursor()
-        saved = 0
-        cleaned = []
-        for row in rows:
-            name = (row.get('name') or '').strip()
-            if not name:
-                continue
+        rows = list(data_rows or [])
+        if not rows:
+            return [], '', []
+        try:
+            conn = get_connection(); cur = conn.cursor()
+            saved = 0
+            cleaned = []
             def n(v):
-                try: return float(v or 0)
-                except: return 0.0
-            # New extended columns (may not yet be in table for older deployments; ignore errors silently)
-            extended_sql = '''
-                INSERT INTO sign_types (name, description, material_alt, unit_price, material, price_per_sq_ft, width, height, material_multiplier, install_type, install_time_hours, per_sign_install_rate, image_path)
-                VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)
-                ON CONFLICT(name) DO UPDATE SET description=excluded.description, material_alt=excluded.material_alt, unit_price=excluded.unit_price,
-                    material=excluded.material, price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height,
-                    material_multiplier=excluded.material_multiplier, install_type=excluded.install_type, install_time_hours=excluded.install_time_hours,
-                    per_sign_install_rate=excluded.per_sign_install_rate, image_path=COALESCE(excluded.image_path, image_path)
-            '''
-            material_alt = (row.get('material_alt') or row.get('Material2') or '')[:120]
-            material_multiplier = n(row.get('material_multiplier'))
-            install_type_val = (row.get('install_type') or '')[:60]
-            install_time_hours = n(row.get('install_time_hours') or row.get('install_time'))
-            per_sign_install_rate = n(row.get('per_sign_install_rate'))
-            try:
-                cur.execute(extended_sql, (
-                    name,
-                    (row.get('description') or '')[:255],
-                    material_alt,
-                    n(row.get('unit_price')),
-                    (row.get('material') or '')[:120],
-                    n(row.get('price_per_sq_ft')),
-                    n(row.get('width')),
-                    n(row.get('height')),
-                    material_multiplier,
-                    install_type_val,
-                    install_time_hours,
-                    per_sign_install_rate,
-                    (row.get('image_path') or None)
-                ))
-            except Exception:
-                # Fallback to legacy column set if migration not applied
-                cur.execute('''
-                    INSERT INTO sign_types (name, description, unit_price, material, price_per_sq_ft, width, height)
-                    VALUES (?,?,?,?,?,?,?)
-                    ON CONFLICT(name) DO UPDATE SET description=excluded.description, unit_price=excluded.unit_price,
-                        material=excluded.material, price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height
-                ''', (
-                    name,
-                    (row.get('description') or '')[:255],
-                    n(row.get('unit_price')),
-                    (row.get('material') or '')[:120],
-                    n(row.get('price_per_sq_ft')),
-                    n(row.get('width')),
-                    n(row.get('height'))
-                ))
-            saved += 1
-            cleaned.append(row)
-        conn.commit(); conn.close()
-        return cleaned, f'Saved {saved} rows', cleaned
+                try:
+                    return float(v or 0)
+                except Exception:
+                    return 0.0
+            if backend == 'sqlite':
+                sql = (
+                    'INSERT INTO sign_types (name, description, material_alt, unit_price, material, price_per_sq_ft, width, height, '
+                    'material_multiplier, install_type, install_time_hours, per_sign_install_rate, image_path) '
+                    'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?) '
+                    'ON CONFLICT(name) DO UPDATE SET description=excluded.description, material_alt=excluded.material_alt, unit_price=excluded.unit_price, '
+                    'material=excluded.material, price_per_sq_ft=excluded.price_per_sq_ft, width=excluded.width, height=excluded.height, '
+                    'material_multiplier=excluded.material_multiplier, install_type=excluded.install_type, install_time_hours=excluded.install_time_hours, '
+                    'per_sign_install_rate=excluded.per_sign_install_rate, image_path=COALESCE(excluded.image_path, image_path)'
+                )
+                for row in rows:
+                    name = (row.get('name') or '').strip()
+                    if not name:
+                        continue
+                    cur.execute(sql, (
+                        name,
+                        (row.get('description') or '')[:255],
+                        (row.get('material_alt') or '')[:120],
+                        n(row.get('unit_price')),
+                        (row.get('material') or '')[:120],
+                        n(row.get('price_per_sq_ft')),
+                        n(row.get('width')),
+                        n(row.get('height')),
+                        n(row.get('material_multiplier')),
+                        (row.get('install_type') or '')[:60],
+                        n(row.get('install_time_hours')),
+                        n(row.get('per_sign_install_rate')),
+                        row.get('image_path')
+                    ))
+                    saved += 1
+                    cleaned.append(row)
+            else:
+                # MSSQL path: UPDATE first; if nothing updated, INSERT
+                for row in rows:
+                    name = (row.get('name') or '').strip()
+                    if not name:
+                        continue
+                    desc = (row.get('description') or '')[:255]
+                    mat_alt = (row.get('material_alt') or '')[:120]
+                    unit = n(row.get('unit_price'))
+                    mat = (row.get('material') or '')[:120]
+                    ppsf = n(row.get('price_per_sq_ft'))
+                    w = n(row.get('width'))
+                    h = n(row.get('height'))
+                    mult = n(row.get('material_multiplier'))
+                    inst_type = (row.get('install_type') or '')[:60]
+                    inst_hours = n(row.get('install_time_hours'))
+                    per_sign = n(row.get('per_sign_install_rate'))
+                    img = row.get('image_path')
+                    cur.execute(
+                        'UPDATE sign_types SET description=?, material_alt=?, unit_price=?, material=?, price_per_sq_ft=?, width=?, height=?, '
+                        'material_multiplier=?, install_type=?, install_time_hours=?, per_sign_install_rate=?, image_path=? WHERE name=?',
+                        (desc, mat_alt, unit, mat, ppsf, w, h, mult, inst_type, inst_hours, per_sign, img, name)
+                    )
+                    if getattr(cur, 'rowcount', 0) == 0:
+                        cur.execute(
+                            'INSERT INTO sign_types (name, description, material_alt, unit_price, material, price_per_sq_ft, width, height, material_multiplier, install_type, install_time_hours, per_sign_install_rate, image_path) '
+                            'VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)',
+                            (name, desc, mat_alt, unit, mat, ppsf, w, h, mult, inst_type, inst_hours, per_sign, img)
+                        )
+                    saved += 1
+                    cleaned.append(row)
+            conn.commit(); conn.close()
+            return cleaned, dbc.Alert(f'Saved {saved} sign types', color='success'), cleaned
+        except Exception as e:
+            return rows, dbc.Alert(f'Error saving sign types: {e}', color='danger'), rows
+
+    # No relevant trigger -> no update
     raise PreventUpdate
 
 # Dynamic page size control for sign types table
@@ -3698,16 +3728,23 @@ def update_debug_stats(active_tab, sign_save_msg, material_msg):
     if active_tab != 'signs-tab':
         raise PreventUpdate
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         cur = conn.cursor()
         cur.execute('SELECT COUNT(*) FROM sign_types')
         sign_count = cur.fetchone()[0]
         cur.execute('SELECT COUNT(*) FROM material_pricing')
         mat_count = cur.fetchone()[0]
-        cur.execute("SELECT name FROM sign_types ORDER BY last_modified DESC LIMIT 3")
-        recent_signs = [r[0] for r in cur.fetchall()]
-        cur.execute("SELECT material_name FROM material_pricing ORDER BY last_updated DESC LIMIT 3")
-        recent_mats = [r[0] for r in cur.fetchall()]
+        # Backend-specific top/limit syntax
+        if backend == 'mssql':
+            cur.execute("SELECT TOP 3 name FROM sign_types ORDER BY last_modified DESC")
+            recent_signs = [r[0] for r in cur.fetchall()]
+            cur.execute("SELECT TOP 3 material_name FROM material_pricing ORDER BY last_updated DESC")
+            recent_mats = [r[0] for r in cur.fetchall()]
+        else:
+            cur.execute("SELECT name FROM sign_types ORDER BY last_modified DESC LIMIT 3")
+            recent_signs = [r[0] for r in cur.fetchall()]
+            cur.execute("SELECT material_name FROM material_pricing ORDER BY last_updated DESC LIMIT 3")
+            recent_mats = [r[0] for r in cur.fetchall()]
         conn.close()
         return f"sign_types: {sign_count} (recent: {', '.join(recent_signs) if recent_signs else 'n/a'}) | materials: {mat_count} (recent: {', '.join(recent_mats) if recent_mats else 'n/a'})"
     except Exception as e:
@@ -3800,7 +3837,7 @@ def static_tree_hover(hoverData):
         raise PreventUpdate
     # Fetch sign details including image
     try:
-        conn = sqlite3.connect(DATABASE_PATH)
+        conn = get_connection()
         sdf = pd.read_sql_query('SELECT name, description, material, width, height, unit_price, price_per_sq_ft, material_multiplier, image_path FROM sign_types WHERE LOWER(name)=LOWER(?)', conn, params=(base,))
         conn.close()
     except Exception as e:
@@ -3859,7 +3896,7 @@ def manage_material_pricing(active_tab, add_clicks, save_clicks, recalc_clicks, 
     # 1. Tab switched to Sign Types: load fresh data
     if 'main-tabs' in triggered and active_tab == 'signs-tab':
         try:
-            conn = sqlite3.connect(DATABASE_PATH)
+            conn = get_connection()
             df = pd.read_sql_query(
                 "SELECT name, description, material_alt, unit_price, material, price_per_sq_ft, material_multiplier, width, height, install_type, install_time_hours, per_sign_install_rate, image_path FROM sign_types ORDER BY name",
                 conn
@@ -3872,7 +3909,7 @@ def manage_material_pricing(active_tab, add_clicks, save_clicks, recalc_clicks, 
 
     # 2. Add new blank row
     if 'add-sign-btn' in triggered and active_tab == 'signs-tab':
-        rows = data_rows or []
+        rows = rows or []
         rows.append({
             'name':'','description':'','material_alt':'','unit_price':0,'material':'','price_per_sq_ft':0,
             'material_multiplier':0,'width':0,'height':0,'install_type':'','install_time_hours':0,'per_sign_install_rate':0,'image_path':None
@@ -3881,11 +3918,11 @@ def manage_material_pricing(active_tab, add_clicks, save_clicks, recalc_clicks, 
 
     # 3. User edited table -> persist changes
     if 'signs-table' in triggered and active_tab == 'signs-tab':
-        rows = data_rows or []
+        rows = rows or []
         if not rows:
             return [], '', []
         try:
-            conn = sqlite3.connect(DATABASE_PATH); cur = conn.cursor()
+            conn = get_connection(); cur = conn.cursor()
             saved = 0
             cleaned = []
             def n(v):
@@ -3937,7 +3974,7 @@ def save_group(n_clicks, name, desc):
     name = (name or '').strip()
     if not name:
         return dbc.Alert('Name required', color='danger'), dash.no_update, dash.no_update
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     try:
         cur.execute('''
@@ -3968,7 +4005,7 @@ def manage_group_members(group_id, add_clicks, save_clicks, sign_type_id, qty, r
     triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
     if not group_id:
         raise PreventUpdate
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     feedback = dash.no_update
     if 'group-add-sign-btn' in triggered and sign_type_id:
@@ -4008,7 +4045,7 @@ def manage_group_members(group_id, add_clicks, save_clicks, sign_type_id, qty, r
 def populate_group_project_options(active_tab):
     if active_tab != 'groups-tab':
         raise PreventUpdate
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     df = pd.read_sql_query('SELECT id, name FROM projects ORDER BY name', conn)
     conn.close()
     return [{'label': r.name, 'value': r.id} for r in df.itertuples()]
@@ -4021,7 +4058,7 @@ def populate_group_project_options(active_tab):
 def populate_group_buildings(project_id):
     if not project_id:
         return [], None
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     df = pd.read_sql_query('SELECT id, name FROM buildings WHERE project_id=? ORDER BY name', conn, params=(project_id,))
     conn.close()
     opts = [{'label': r.name,'value': r.id} for r in df.itertuples()]
@@ -4042,7 +4079,7 @@ def manage_building_groups(building_id, add_clicks, save_clicks, group_id, qty, 
     triggered = [t['prop_id'].split('.')[0] for t in callback_context.triggered] if callback_context.triggered else []
     if not building_id:
         raise PreventUpdate
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     feedback = dash.no_update
     if 'group-assign-btn' in triggered and group_id:
@@ -4081,7 +4118,7 @@ def manage_building_groups(building_id, add_clicks, save_clicks, group_id, qty, 
 def bv_load_buildings(project_id):
     if not project_id:
         raise PreventUpdate
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     df = pd.read_sql_query('SELECT id, name FROM buildings WHERE project_id=? ORDER BY name', conn, params=(project_id,))
     conn.close()
     opts = [{'label': r.name, 'value': r.id} for r in df.itertuples()]
@@ -4100,7 +4137,7 @@ def bv_load_buildings(project_id):
 def bv_load_building(building_id):
     if not building_id:
         raise PreventUpdate
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     st_df = pd.read_sql_query('SELECT id, name, unit_price FROM sign_types ORDER BY name', conn)
     b_df = pd.read_sql_query('SELECT name, description FROM buildings WHERE id=?', conn, params=(building_id,))
     rows_df = pd.read_sql_query('''SELECT st.name as sign_name, bs.quantity, st.unit_price, (bs.quantity*st.unit_price) as total
@@ -4141,7 +4178,7 @@ def bv_manage_signs(add_clicks, save_clicks, delete_clicks, delete_group_clicks,
     if not building_id:
         raise PreventUpdate
     msg = dash.no_update
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     if 'bv-add-sign-btn' in triggered and sign_type_id:
         q = max(1, int(qty or 1))
@@ -4207,7 +4244,7 @@ def bv_rename_building(n_clicks, project_id, building_id, new_name):
         raise PreventUpdate
     if not (project_id and building_id and new_name and new_name.strip()):
         raise PreventUpdate
-    conn = sqlite3.connect(DATABASE_PATH)
+    conn = get_connection()
     cur = conn.cursor()
     cur.execute('SELECT 1 FROM buildings WHERE project_id=? AND LOWER(name)=LOWER(?) AND id<>?', (project_id, new_name.strip(), building_id))
     if cur.fetchone():
@@ -4225,16 +4262,7 @@ def bv_rename_building(n_clicks, project_id, building_id, new_name):
             break
     return opts, building_id, meta
 
-# ------------------ Health Endpoint ------------------ #
-@app.server.route('/health')
-def health():
-    try:
-        conn = sqlite3.connect(DATABASE_PATH)
-        conn.execute('SELECT 1')
-        conn.close()
-        return {"status": "ok", "db": "reachable"}
-    except Exception as e:
-        return {"status": "error", "detail": str(e)}, 500
+## Duplicate /health route removed (earlier Flask @server.route('/health') remains active)
 
 # ------------------ Port Selection Helper ------------------ #
 def find_free_port(preferred: int) -> int:
